@@ -1,0 +1,22 @@
+# Gradle & build outputs
+**/build/
+**/.gradle/
+**/.kotlin/
+android/local.properties
+
+# IDE & OS
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Android binaries & signing
+*.apk
+*.aab
+*.ap_
+*.dex
+*.keystore
+*.jks
+*.hprof
+captures/
+.cxx/
