@@ -9,6 +9,8 @@ import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import coil3.request.allowHardware
+import coil3.size.Precision
+import coil3.size.Size
 import com.lin.music.core.data.datastore.AuthStore
 import com.lin.music.core.data.datastore.PreferencesStore
 import com.lin.music.core.data.repository.MusicRepository
@@ -37,6 +39,7 @@ import com.lin.music.core.playback.cache.TrackPrecacher
 import com.lin.music.core.playback.download.DownloadController
 import com.lin.music.core.playback.download.SmartDownloadManager
 import com.lin.music.core.playback.queue.PlayerController
+import com.lin.music.core.playback.queue.QueueSnapshot
 import com.lin.music.core.playback.queue.QueueUndoToken
 import com.lin.music.util.ShareHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -203,6 +206,7 @@ class MainViewModel @Inject constructor(
     private var lyricsJob: Job? = null
     private var relatedJob: Job? = null
     private var paletteJob: Job? = null
+    private var adjacentPrewarmJob: Job? = null
     private var lastSyncCompletedMs: Long = 0L
     private var lastPaletteVideoId: String? = null
     private var loadedLyricsVideoId: String? = null
@@ -241,6 +245,21 @@ class MainViewModel @Inject constructor(
                 }
         }
         viewModelScope.launch {
+            playerController.queueSnapshot
+                .distinctUntilChanged { a, b ->
+                    a.currentIndex == b.currentIndex &&
+                        a.repeatMode == b.repeatMode &&
+                        a.shuffleEnabled == b.shuffleEnabled &&
+                        a.nextTrackIndexOrNull()?.let { a.items.getOrNull(it)?.videoId } ==
+                        b.nextTrackIndexOrNull()?.let { b.items.getOrNull(it)?.videoId } &&
+                        a.previousTrackIndexOrNull()?.let { a.items.getOrNull(it)?.videoId } ==
+                        b.previousTrackIndexOrNull()?.let { b.items.getOrNull(it)?.videoId }
+                }
+                .collectLatest { snap ->
+                    scheduleAdjacentPrewarm(snap)
+                }
+        }
+        viewModelScope.launch {
             playerController.errors.collect { err -> showToast(err) }
         }
         viewModelScope.launch {
@@ -259,10 +278,74 @@ class MainViewModel @Inject constructor(
     fun setUiForeground(foreground: Boolean) {
         playerController.setUiForeground(foreground)
         if (foreground) {
-            val track = playerController.queueSnapshot.value.currentTrack
+            val snap = playerController.queueSnapshot.value
+            val track = snap.currentTrack
             if (track != null && track.videoId != lastPaletteVideoId) {
                 paletteJob?.cancel()
                 paletteJob = viewModelScope.launch { extractPalette(track) }
+            }
+            scheduleAdjacentPrewarm(snap)
+        } else {
+            adjacentPrewarmJob?.cancel()
+        }
+    }
+
+    private fun scheduleAdjacentPrewarm(snapshot: QueueSnapshot) {
+        if (!playerController.isUiForeground.value) return
+        adjacentPrewarmJob?.cancel()
+        val currentId = snapshot.currentTrack?.videoId
+        val next1 = snapshot.nextTrackIndexOrNull()?.let { snapshot.items.getOrNull(it) }
+        val prev1 = snapshot.previousTrackIndexOrNull()?.let { snapshot.items.getOrNull(it) }
+        val next2 = if (!snapshot.shuffleEnabled && snapshot.items.size > 1) {
+            val rawNext2 = snapshot.currentIndex + 2
+            val idx2 = when {
+                rawNext2 in snapshot.items.indices -> rawNext2
+                snapshot.repeatMode == com.lin.music.core.model.RepeatMode.ALL ->
+                    (rawNext2 % snapshot.items.size)
+                else -> -1
+            }
+            snapshot.items.getOrNull(idx2)
+        } else null
+
+        val targets = listOfNotNull(next1, prev1, next2)
+            .filter { it.videoId.isNotBlank() && it.videoId != currentId }
+            .distinctBy { it.videoId }
+        if (targets.isEmpty()) return
+
+        val paletteTargets = listOfNotNull(next1, prev1)
+            .map { it.videoId }
+            .toSet()
+
+        adjacentPrewarmJob = viewModelScope.launch {
+            delay(150L)
+            targets.forEach { target ->
+                val hiResUrl = highResArtworkUrl(target.thumbnailUrl) ?: return@forEach
+                val req = ImageRequest.Builder(context)
+                    .data(hiResUrl)
+                    .size(Size.ORIGINAL)
+                    .precision(Precision.EXACT)
+                    .build()
+                imageLoader.enqueue(req)
+
+                val needPalette = target.videoId in paletteTargets &&
+                    synchronized(paletteCache) { paletteCache[hiResUrl] == null }
+                if (needPalette) {
+                    val extracted = withContext(Dispatchers.IO) {
+                        runCatching {
+                            val pReq = ImageRequest.Builder(context)
+                                .data(hiResUrl)
+                                .allowHardware(false)
+                                .size(96)
+                                .build()
+                            val res = imageLoader.execute(pReq)
+                            val bmp = (res as? SuccessResult)?.image?.let { (it as? BitmapImage)?.bitmap }
+                            bmp?.let { AlbumColorExtractor.extractFromBitmap(it) }
+                        }.getOrNull()
+                    }
+                    if (extracted != null) {
+                        synchronized(paletteCache) { paletteCache[hiResUrl] = extracted }
+                    }
+                }
             }
         }
     }
@@ -283,7 +366,7 @@ class MainViewModel @Inject constructor(
             lastPaletteVideoId = track.videoId
             return
         }
-        paletteCache[resolvedUrl]?.let {
+        synchronized(paletteCache) { paletteCache[resolvedUrl] }?.let {
             _artworkPalette.value = it
             lastPaletteVideoId = track.videoId
             return
@@ -301,7 +384,7 @@ class MainViewModel @Inject constructor(
             }.getOrNull()
         }
         if (extracted != null) {
-            paletteCache[resolvedUrl] = extracted
+            synchronized(paletteCache) { paletteCache[resolvedUrl] = extracted }
             _artworkPalette.value = extracted
         } else {
             _artworkPalette.value = null

@@ -711,6 +711,8 @@ fun LinAppShell(
                         onSwipeLeftAddToQueue = mainViewModel::addToQueue,
                         onAlbumClick = { id -> mainViewModel.openDetail(DetailRoute.Album(id)) },
                         onPlaylistClick = { id -> mainViewModel.openDetail(DetailRoute.Playlist(id)) },
+                        onSkipToPreviousTrack = mainViewModel.playerController::skipToPreviousTrack,
+                        onPrewarmSwipeTarget = mainViewModel::prefetchTrack,
                         onDockStateChanged = { isLyrics, isRelated ->
                             mainViewModel.onNowPlayingDockChanged(isPlayerExpanded, isLyrics, isRelated)
                         }

@@ -60,11 +60,13 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -304,11 +306,19 @@ fun NowPlayingSheet(
     onSwipeLeftAddToQueue: (Track) -> Unit,
     onAlbumClick: (String) -> Unit,
     onPlaylistClick: (String) -> Unit,
+    onSkipToPreviousTrack: () -> Unit = onSkipPrevious,
+    onPrewarmSwipeTarget: (Track) -> Unit = {},
     onDockStateChanged: (isLyrics: Boolean, isRelated: Boolean) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
     val currentTrack = queueSnapshot.currentTrack
+    val prevTrack = remember(queueSnapshot) {
+        queueSnapshot.previousTrackIndexOrNull()?.let { queueSnapshot.items.getOrNull(it) }
+    }
+    val nextTrack = remember(queueSnapshot) {
+        queueSnapshot.nextTrackIndexOrNull()?.let { queueSnapshot.items.getOrNull(it) }
+    }
     var activeDock by remember { mutableStateOf(NowPlayingDockTab.PLAYER) }
     var showSaveQueueDialog by remember { mutableStateOf(false) }
 
@@ -446,6 +456,8 @@ fun NowPlayingSheet(
                             if (currentTrack != null) {
                                 PlayerMainView(
                                     track = currentTrack,
+                                    prevTrack = prevTrack,
+                                    nextTrack = nextTrack,
                                     isPlaying = isPlaying,
                                     isBuffering = isBuffering,
                                     positionMsFlow = positionMsFlow,
@@ -457,7 +469,9 @@ fun NowPlayingSheet(
                                     repeatMode = queueSnapshot.repeatMode,
                                     onTogglePlayPause = onTogglePlayPause,
                                     onSkipNext = onSkipNext,
+                                    onSkipToPreviousTrack = onSkipToPreviousTrack,
                                     onSkipPrevious = onSkipPrevious,
+                                    onPrewarmSwipeTarget = onPrewarmSwipeTarget,
                                     onSeekTo = onSeekTo,
                                     onToggleShuffle = onToggleShuffle,
                                     onCycleRepeat = onCycleRepeat,
@@ -621,6 +635,8 @@ fun NowPlayingSheet(
 @Composable
 private fun PlayerMainView(
     track: Track,
+    prevTrack: Track?,
+    nextTrack: Track?,
     isPlaying: Boolean,
     isBuffering: Boolean,
     positionMsFlow: StateFlow<Long>,
@@ -632,7 +648,9 @@ private fun PlayerMainView(
     repeatMode: RepeatMode,
     onTogglePlayPause: () -> Unit,
     onSkipNext: () -> Unit,
+    onSkipToPreviousTrack: () -> Unit,
     onSkipPrevious: () -> Unit,
+    onPrewarmSwipeTarget: (Track) -> Unit,
     onSeekTo: (Long) -> Unit,
     onToggleShuffle: () -> Unit,
     onCycleRepeat: () -> Unit,
@@ -647,12 +665,21 @@ private fun PlayerMainView(
     onSheetVerticalDragCancel: () -> Unit
 ) {
     val linColors = LinTheme.colors
-    val context = LocalContext.current
+    val density = LocalDensity.current
     val artScope = rememberCoroutineScope()
-    val artDragX = remember(track.videoId) { Animatable(0f) }
-    var totalDragX by remember(track.videoId) { mutableFloatStateOf(0f) }
-    var totalDragY by remember(track.videoId) { mutableFloatStateOf(0f) }
-    var dragAxis by remember(track.videoId) { mutableIntStateOf(0) } // 0=none, 1=horizontal, 2=vertical
+    val artDragX = remember { Animatable(0f) }
+
+    val latestTrack by rememberUpdatedState(track)
+    val latestPrevTrack by rememberUpdatedState(prevTrack)
+    val latestNextTrack by rememberUpdatedState(nextTrack)
+    val latestShuffle by rememberUpdatedState(shuffleEnabled)
+    val latestOnSkipNext by rememberUpdatedState(onSkipNext)
+    val latestOnSkipToPrev by rememberUpdatedState(onSkipToPreviousTrack)
+    val latestOnSkipPrevFallback by rememberUpdatedState(onSkipPrevious)
+    val latestOnPrewarm by rememberUpdatedState(onPrewarmSwipeTarget)
+    val latestOnVerticalDrag by rememberUpdatedState(onSheetVerticalDrag)
+    val latestOnVerticalDragEnd by rememberUpdatedState(onSheetVerticalDragEnd)
+    val latestOnVerticalDragCancel by rememberUpdatedState(onSheetVerticalDragCancel)
 
     val artPlayScale by animateFloatAsState(
         targetValue = if (isPlaying) 1f else 0.96f,
@@ -667,7 +694,7 @@ private fun PlayerMainView(
             .padding(bottom = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Flexible centered artwork box guarantees equal spacing to top LIN header and bottom title block
+        // Centered swipeable carousel container: renders prev/current/next covers at 1:1 finger tracking
         BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
@@ -675,80 +702,162 @@ private fun PlayerMainView(
             contentAlignment = Alignment.Center
         ) {
             val artSide = minOf(maxWidth * 0.96f, (maxHeight - 24.dp).coerceAtLeast(180.dp))
+            val artSidePx = with(density) { artSide.toPx() }.coerceAtLeast(1f)
+            val stridePx = artSidePx + with(density) { 18.dp.toPx() }
+
             Box(
                 modifier = Modifier
-                    .size(artSide)
-                    .graphicsLayer {
-                        val safeArtScale = artPlayScale.coerceAtLeast(0.5f)
-                        translationX = artDragX.value * 0.25f
-                        scaleX = safeArtScale
-                        scaleY = safeArtScale
-                    }
-                    .clip(LinSharpShape)
-                    .background(linColors.glassBorder)
-                    .pointerInput(track.videoId) {
+                    .fillMaxWidth()
+                    .height(artSide)
+                    .clipToBounds()
+                    .pointerInput(artSidePx) {
+                        var totalDragX = 0f
+                        var totalDragY = 0f
+                        var dragAxis = 0 // 0=none, 1=horizontal, 2=vertical
+                        var prewarmedDir = 0 // -1=left/next, +1=right/prev
+
                         detectDragGestures(
                             onDragStart = {
                                 totalDragX = 0f
                                 totalDragY = 0f
                                 dragAxis = 0
+                                prewarmedDir = 0
                             },
                             onDrag = { change, dragAmount ->
                                 change.consume()
                                 totalDragX += dragAmount.x
                                 totalDragY += dragAmount.y
-                                if (dragAxis == 0 && (abs(totalDragX) > 16f || abs(totalDragY) > 16f)) {
+                                if (dragAxis == 0 && (abs(totalDragX) > 14f || abs(totalDragY) > 14f)) {
                                     dragAxis = if (abs(totalDragX) >= abs(totalDragY)) 1 else 2
                                 }
                                 when (dragAxis) {
-                                    1 -> artScope.launch { artDragX.snapTo(totalDragX) }
-                                    2 -> onSheetVerticalDrag(dragAmount.y)
+                                    1 -> {
+                                        val curPrev = latestPrevTrack
+                                        val curNext = latestNextTrack
+                                        if (totalDragX < -18f && prewarmedDir != -1 && curNext != null) {
+                                            prewarmedDir = -1
+                                            latestOnPrewarm(curNext)
+                                        } else if (totalDragX > 18f && prewarmedDir != 1 && curPrev != null) {
+                                            prewarmedDir = 1
+                                            latestOnPrewarm(curPrev)
+                                        }
+                                        val effectiveX = when {
+                                            totalDragX < 0f && curNext == null -> totalDragX * 0.28f
+                                            totalDragX > 0f && curPrev == null -> totalDragX * 0.28f
+                                            else -> totalDragX.coerceIn(-stridePx, stridePx)
+                                        }
+                                        artScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                                            artDragX.snapTo(effectiveX)
+                                        }
+                                    }
+                                    2 -> latestOnVerticalDrag(dragAmount.y)
                                 }
                             },
                             onDragEnd = {
                                 when (dragAxis) {
                                     1 -> {
-                                        if (totalDragX < -100f) onSkipNext()
-                                        else if (totalDragX > 100f) onSkipPrevious()
-                                        artScope.launch {
-                                            artDragX.animateTo(0f, spring(dampingRatio = 0.82f, stiffness = 360f))
+                                        val skipThreshold = minOf(with(density) { 84.dp.toPx() }, artSidePx * 0.22f)
+                                        val curPrev = latestPrevTrack
+                                        val curNext = latestNextTrack
+                                        when {
+                                            totalDragX < -skipThreshold && curNext != null -> {
+                                                val incomingStartX = (artDragX.value + stridePx).coerceIn(0f, stridePx)
+                                                latestOnSkipNext()
+                                                artScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                                                    artDragX.snapTo(incomingStartX)
+                                                    artDragX.animateTo(
+                                                        0f,
+                                                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 420f)
+                                                    )
+                                                }
+                                            }
+                                            totalDragX < -skipThreshold && latestShuffle -> {
+                                                latestOnSkipNext()
+                                                artScope.launch {
+                                                    artDragX.animateTo(
+                                                        0f,
+                                                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 420f)
+                                                    )
+                                                }
+                                            }
+                                            totalDragX > skipThreshold && curPrev != null -> {
+                                                val incomingStartX = (artDragX.value - stridePx).coerceIn(-stridePx, 0f)
+                                                latestOnSkipToPrev()
+                                                artScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                                                    artDragX.snapTo(incomingStartX)
+                                                    artDragX.animateTo(
+                                                        0f,
+                                                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 420f)
+                                                    )
+                                                }
+                                            }
+                                            totalDragX > skipThreshold && latestShuffle -> {
+                                                latestOnSkipPrevFallback()
+                                                artScope.launch {
+                                                    artDragX.animateTo(
+                                                        0f,
+                                                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 420f)
+                                                    )
+                                                }
+                                            }
+                                            else -> {
+                                                artScope.launch {
+                                                    artDragX.animateTo(
+                                                        0f,
+                                                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 420f)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
-                                    2 -> onSheetVerticalDragEnd()
+                                    2 -> latestOnVerticalDragEnd()
                                 }
-                                totalDragX = 0f
-                                totalDragY = 0f
-                                dragAxis = 0
                             },
                             onDragCancel = {
-                                if (dragAxis == 2) onSheetVerticalDragCancel()
+                                if (dragAxis == 2) latestOnVerticalDragCancel()
                                 artScope.launch {
-                                    artDragX.animateTo(0f, spring(dampingRatio = 0.82f, stiffness = 360f))
+                                    artDragX.animateTo(
+                                        0f,
+                                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 420f)
+                                    )
                                 }
-                                totalDragX = 0f
-                                totalDragY = 0f
-                                dragAxis = 0
                             }
                         )
-                    }
+                    },
+                contentAlignment = Alignment.Center
             ) {
-                val hiResUrl = remember(track.thumbnailUrl) { highResArtworkUrl(track.thumbnailUrl) }
-                if (!hiResUrl.isNullOrBlank()) {
-                    val request = remember(hiResUrl) {
-                        ImageRequest.Builder(context)
-                            .data(hiResUrl)
-                            .size(Size.ORIGINAL)
-                            .precision(Precision.EXACT)
-                            .crossfade(true)
-                            .build()
-                    }
-                    AsyncImage(
-                        model = request,
-                        contentDescription = track.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                val dragX = artDragX.value
+                val safeArtScale = artPlayScale.coerceAtLeast(0.5f)
+
+                if (prevTrack != null && dragX > 0.5f) {
+                    AlbumCoverTile(
+                        track = prevTrack,
+                        artSide = artSide,
+                        modifier = Modifier.graphicsLayer {
+                            translationX = dragX - stridePx
+                        }
                     )
                 }
+
+                if (nextTrack != null && dragX < -0.5f) {
+                    AlbumCoverTile(
+                        track = nextTrack,
+                        artSide = artSide,
+                        modifier = Modifier.graphicsLayer {
+                            translationX = dragX + stridePx
+                        }
+                    )
+                }
+
+                AlbumCoverTile(
+                    track = latestTrack,
+                    artSide = artSide,
+                    modifier = Modifier.graphicsLayer {
+                        translationX = dragX
+                        scaleX = safeArtScale
+                        scaleY = safeArtScale
+                    }
+                )
             }
         }
 
@@ -758,7 +867,7 @@ private fun PlayerMainView(
                 targetState = track,
                 contentKey = { it.videoId },
                 transitionSpec = {
-                    fadeIn(tween(240, easing = FastOutSlowInEasing)) togetherWith fadeOut(tween(180))
+                    fadeIn(tween(150, easing = FastOutSlowInEasing)) togetherWith fadeOut(tween(100))
                 },
                 label = "npTrackHeader"
             ) { displayTrack ->
@@ -975,6 +1084,40 @@ private fun PlayerMainView(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AlbumCoverTile(
+    track: Track,
+    artSide: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier
+) {
+    val linColors = LinTheme.colors
+    val context = LocalContext.current
+    Box(
+        modifier = modifier
+            .size(artSide)
+            .clip(LinSharpShape)
+            .background(linColors.glassBorder)
+    ) {
+        val hiResUrl = remember(track.thumbnailUrl) { highResArtworkUrl(track.thumbnailUrl) }
+        if (!hiResUrl.isNullOrBlank()) {
+            val request = remember(hiResUrl) {
+                ImageRequest.Builder(context)
+                    .data(hiResUrl)
+                    .size(Size.ORIGINAL)
+                    .precision(Precision.EXACT)
+                    .crossfade(false)
+                    .build()
+            }
+            AsyncImage(
+                model = request,
+                contentDescription = track.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
         }
     }
 }

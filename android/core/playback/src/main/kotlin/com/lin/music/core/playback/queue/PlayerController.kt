@@ -348,7 +348,15 @@ class PlayerController @Inject constructor(
 
     fun skipNext() {
         val curSnap = stateHub.queueEngine.snapshot
-        trackPrecacher.onPlaybackLoadingOrBuffering(curSnap.items.getOrNull(curSnap.currentIndex + 1)?.videoId)
+        val targetIdx = curSnap.nextTrackIndexOrNull()
+        val nextTrack = targetIdx?.let { curSnap.items.getOrNull(it) }
+        if (targetIdx != null && nextTrack != null) {
+            trackPrecacher.onPlaybackLoadingOrBuffering(nextTrack.videoId)
+            stateHub.publishQueue(stateHub.queueEngine.setCurrentIndex(targetIdx))
+            stateHub.updatePosition(0L, nextTrack.durationMs)
+        } else {
+            trackPrecacher.onPlaybackLoadingOrBuffering(curSnap.items.getOrNull(curSnap.currentIndex + 1)?.videoId)
+        }
         scope.launch {
             val ctrl = ensureController()
             if (ctrl.playbackState == Player.STATE_IDLE && ctrl.mediaItemCount > 0) {
@@ -356,6 +364,28 @@ class PlayerController @Inject constructor(
             }
             if (ctrl.hasNextMediaItem()) ctrl.seekToNextMediaItem()
         }
+    }
+
+    fun skipToPreviousTrack() {
+        val curSnap = stateHub.queueEngine.snapshot
+        val targetIdx = curSnap.previousTrackIndexOrNull()
+        val prevTrack = targetIdx?.let { curSnap.items.getOrNull(it) }
+        if (targetIdx != null && prevTrack != null) {
+            trackPrecacher.onPlaybackLoadingOrBuffering(prevTrack.videoId)
+            stateHub.publishQueue(stateHub.queueEngine.setCurrentIndex(targetIdx))
+            stateHub.updatePosition(0L, prevTrack.durationMs)
+            scope.launch {
+                val ctrl = ensureController()
+                if (ctrl.playbackState == Player.STATE_IDLE && ctrl.mediaItemCount > 0) {
+                    ctrl.prepare()
+                }
+                if (targetIdx in 0 until ctrl.mediaItemCount) {
+                    ctrl.seekToDefaultPosition(targetIdx)
+                }
+            }
+            return
+        }
+        skipPrevious()
     }
 
     fun skipPrevious() {

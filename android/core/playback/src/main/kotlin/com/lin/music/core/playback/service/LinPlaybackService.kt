@@ -102,6 +102,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
 
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private var positionTickerJob: Job? = null
+    private var precacheKickoffJob: Job? = null
     private var smartDownloadSyncJob: Job? = null
     private var persistQueueJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -138,7 +139,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
         }
 
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(25_000, 60_000, 1_200, 2_500)
+            .setBufferDurationsMs(25_000, 60_000, 350, 2_000)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
@@ -233,8 +234,10 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                         readySinceMs = android.os.SystemClock.elapsedRealtime()
                     }
                     evaluatePlaybackHealthForPrecache()
+                    scheduleFastPrecacheCheck()
                     ensurePositionTickerRunning()
                 } else {
+                    precacheKickoffJob?.cancel()
                     healthyForPrecache = false
                     stopPositionTicker()
                     stateHub.reactiveAudioProcessor.resetEnergy()
@@ -253,6 +256,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                 )
                 when (playbackState) {
                     Player.STATE_BUFFERING -> {
+                        precacheKickoffJob?.cancel()
                         readySinceMs = 0L
                         healthyForPrecache = false
                         trackPrecacher.onPlaybackLoadingOrBuffering(
@@ -260,6 +264,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                         )
                     }
                     Player.STATE_IDLE, Player.STATE_ENDED -> {
+                        precacheKickoffJob?.cancel()
                         readySinceMs = 0L
                         healthyForPrecache = false
                         stopPositionTicker()
@@ -275,6 +280,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                         applyLoudnessForCurrentTrack()
                         evaluatePlaybackHealthForPrecache()
                         if (player.isPlaying) {
+                            scheduleFastPrecacheCheck()
                             ensurePositionTickerRunning()
                         }
                     }
@@ -282,6 +288,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                precacheKickoffJob?.cancel()
                 readySinceMs = 0L
                 healthyForPrecache = false
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
@@ -567,6 +574,15 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
             .build()
     }
 
+    private fun scheduleFastPrecacheCheck() {
+        if (!player.isPlaying || player.playbackState != Player.STATE_READY) return
+        precacheKickoffJob?.cancel()
+        precacheKickoffJob = serviceScope.launch {
+            delay(450L)
+            evaluatePlaybackHealthForPrecache()
+        }
+    }
+
     private fun evaluatePlaybackHealthForPrecache() {
         val snap = stateHub.queueEngine.snapshot
         val activeTrack = snap.currentTrack
@@ -578,8 +594,8 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
             android.os.SystemClock.elapsedRealtime() - readySinceMs
         } else 0L
         val leadBufferMs = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
-        val healthy = readyElapsedMs >= 1_200L &&
-            (leadBufferMs >= 5_000L || player.bufferedPercentage >= 15)
+        val healthy = readyElapsedMs >= 400L &&
+            (leadBufferMs >= 3_500L || player.bufferedPercentage >= 10)
         healthyForPrecache = healthy
         if (healthy) {
             val upcoming = listOfNotNull(
@@ -733,6 +749,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
             networkCallback = null
         }
         smartDownloadSyncJob?.cancel()
+        precacheKickoffJob?.cancel()
         persistQueueJob?.cancel()
         stateHub.serviceTimerBridge = null
         positionTickerJob?.cancel()

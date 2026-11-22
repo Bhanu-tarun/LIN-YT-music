@@ -12,6 +12,26 @@ data class QueueSnapshot(
 ) {
     val currentTrack: Track?
         get() = items.getOrNull(currentIndex)
+
+    fun nextTrackIndexOrNull(): Int? {
+        if (shuffleEnabled || items.isEmpty()) return null
+        val next = currentIndex + 1
+        return when {
+            next in items.indices -> next
+            repeatMode == RepeatMode.ALL -> 0
+            else -> null
+        }
+    }
+
+    fun previousTrackIndexOrNull(): Int? {
+        if (shuffleEnabled || items.isEmpty()) return null
+        val prev = currentIndex - 1
+        return when {
+            prev in items.indices -> prev
+            repeatMode == RepeatMode.ALL -> items.lastIndex
+            else -> null
+        }
+    }
 }
 
 data class QueueUndoToken(

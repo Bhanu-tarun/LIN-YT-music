@@ -304,10 +304,10 @@ class TrackPrecacher @Inject constructor(
     companion object {
         const val HEAD_PRECACHE_BYTES = 512L * 1024L
         const val PREVIEW_HEAD_BYTES = 256L * 1024L
-        private const val SETTLE_DELAY_MS = 200L
+        private const val SETTLE_DELAY_MS = 50L
         private const val PRIORITY_BACKOFF_MS = 1_500L
         private const val MAX_PRIORITY_RETRIES = 2
-        private const val PRECACHE_BUFFER_BYTES = 64 * 1024
+        private const val PRECACHE_BUFFER_BYTES = 16 * 1024
 
         fun selectTargets(upcoming: List<Track>, activeVideoId: String?): List<Track> =
             upcoming
