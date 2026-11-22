@@ -478,10 +478,13 @@ fun LinAppShell(
                                 DetailRoute.Settings -> {
                                     val downloadedTracks by libraryViewModel.downloadedTracks.collectAsStateWithLifecycle()
                                     var cacheSizeBytes by remember { mutableLongStateOf(0L) }
+                                    var downloadedSizeBytes by remember { mutableLongStateOf(0L) }
                                     LaunchedEffect(preferences, downloadedTracks.size) {
-                                        cacheSizeBytes = withContext(Dispatchers.IO) {
-                                            settingsViewModel.cacheSizeBytes()
+                                        val (cacheBytes, downloadBytes) = withContext(Dispatchers.IO) {
+                                            settingsViewModel.cacheSizeBytes() to settingsViewModel.downloadSizeBytes()
                                         }
+                                        cacheSizeBytes = cacheBytes
+                                        downloadedSizeBytes = downloadBytes
                                     }
                                     SettingsScreen(
                                         session = session,
@@ -489,6 +492,7 @@ fun LinAppShell(
                                         accentColor = accentColor,
                                         audioSessionId = audioSessionId,
                                         downloadedCount = downloadedTracks.size,
+                                        downloadedSizeBytes = downloadedSizeBytes,
                                         cacheSizeBytes = cacheSizeBytes,
                                         onBack = { mainViewModel.popDetail() },
                                         onSyncNow = { mainViewModel.syncAccount(force = true) },
@@ -558,6 +562,12 @@ fun LinAppShell(
                                         onSubTabChange = { librarySubTab = it },
                                         songsSubFilter = songsSubFilter,
                                         onSongsSubFilterChange = { songsSubFilter = it },
+                                        songsSortOrder = preferences.songsSortOrder,
+                                        onSongsSortOrderChange = libraryViewModel::setSongsSortOrder,
+                                        albumsSortOrder = preferences.albumsSortOrder,
+                                        onAlbumsSortOrderChange = libraryViewModel::setAlbumsSortOrder,
+                                        artistsSortOrder = preferences.artistsSortOrder,
+                                        onArtistsSortOrderChange = libraryViewModel::setArtistsSortOrder,
                                         libraryTracks = libraryTracks,
                                         likedTracks = likedTracks,
                                         downloadedTracks = downloadedTracks,

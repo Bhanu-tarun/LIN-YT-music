@@ -40,7 +40,10 @@ data class UserPreferences(
     val playbackSpeed: Float = 1.0f,
     val playbackPitch: Float = 1.0f,
     val showTrackThumbnails: Boolean = false,
-    val contentRegion: String = ContentRegions.DEFAULT_CODE
+    val contentRegion: String = ContentRegions.DEFAULT_CODE,
+    val songsSortOrder: SongSortOrder = SongSortOrder.DEFAULT,
+    val albumsSortOrder: AlbumSortOrder = AlbumSortOrder.DEFAULT,
+    val artistsSortOrder: ArtistSortOrder = ArtistSortOrder.DEFAULT
 )
 
 @Serializable

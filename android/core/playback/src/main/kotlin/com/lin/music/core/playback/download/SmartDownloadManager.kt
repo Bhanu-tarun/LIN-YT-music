@@ -121,12 +121,13 @@ class SmartDownloadManager @Inject constructor(
         }
 
         val existingById = cacheDao.getAllDownloadsSnapshot().associateBy { it.videoId }
-        plan.addTracks.forEach { entity ->
+        val toDownload = plan.addTracks.mapNotNull { entity ->
             val existing = existingById[entity.videoId]
             val alreadyFlagged = existing != null && (existing.sourceFlags and DownloadEntity.SOURCE_SMART) != 0
-            if (!alreadyFlagged || existing?.state != 2) {
-                downloadController.downloadTrack(entity.toModel(), sourceFlag = DownloadEntity.SOURCE_SMART)
-            }
+            if (!alreadyFlagged || existing?.state != 2) entity.toModel() else null
+        }
+        if (toDownload.isNotEmpty()) {
+            downloadController.downloadAll(toDownload, sourceFlag = DownloadEntity.SOURCE_SMART)
         }
         preferencesStore.setLastSmartDownloadSyncMs(nowMs)
     }
@@ -196,16 +197,17 @@ class SmartDownloadManager @Inject constructor(
             }
 
         val existingById = cacheDao.getAllDownloadsSnapshot().associateBy { it.videoId }
-        candidates.forEach { entity ->
+        val toDownload = candidates.mapNotNull { entity ->
             val existing = existingById[entity.videoId]
             val alreadyFlagged =
                 existing != null && (existing.sourceFlags and DownloadEntity.SOURCE_RECENTLY_PLAYED) != 0
-            if (!alreadyFlagged || existing?.state != 2) {
-                downloadController.downloadTrack(
-                    entity.toModel(),
-                    sourceFlag = DownloadEntity.SOURCE_RECENTLY_PLAYED
-                )
-            }
+            if (!alreadyFlagged || existing?.state != 2) entity.toModel() else null
+        }
+        if (toDownload.isNotEmpty()) {
+            downloadController.downloadAll(
+                toDownload,
+                sourceFlag = DownloadEntity.SOURCE_RECENTLY_PLAYED
+            )
         }
         cacheDao.prunePlaySessionsBefore(nowMs - PLAY_SESSION_RETENTION_MS)
         preferencesStore.setLastRecentDownloadSyncMs(nowMs)

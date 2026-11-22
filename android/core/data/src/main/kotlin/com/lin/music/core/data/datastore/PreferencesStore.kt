@@ -11,10 +11,13 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.lin.music.core.innertube.RegionProvider
+import com.lin.music.core.model.AlbumSortOrder
 import com.lin.music.core.model.AmbientMode
 import com.lin.music.core.model.AmbientReactivity
+import com.lin.music.core.model.ArtistSortOrder
 import com.lin.music.core.model.AudioQuality
 import com.lin.music.core.model.ContentRegions
+import com.lin.music.core.model.SongSortOrder
 import com.lin.music.core.model.UserPreferences
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -58,6 +61,9 @@ class PreferencesStore @Inject constructor(
         val LAST_SMART_DOWNLOAD_SYNC_MS = longPreferencesKey("last_smart_download_sync_ms")
         val LAST_RECENT_DOWNLOAD_SYNC_MS = longPreferencesKey("last_recent_download_sync_ms")
         val CONTENT_REGION = stringPreferencesKey("content_region")
+        val SONGS_SORT_ORDER = stringPreferencesKey("songs_sort_order")
+        val ALBUMS_SORT_ORDER = stringPreferencesKey("albums_sort_order")
+        val ARTISTS_SORT_ORDER = stringPreferencesKey("artists_sort_order")
     }
 
     private fun fromPreferences(prefs: Preferences): UserPreferences {
@@ -89,7 +95,13 @@ class PreferencesStore @Inject constructor(
             playbackSpeed = prefs[Keys.PLAYBACK_SPEED] ?: 1.0f,
             playbackPitch = prefs[Keys.PLAYBACK_PITCH] ?: 1.0f,
             showTrackThumbnails = prefs[Keys.SHOW_THUMBNAILS] ?: false,
-            contentRegion = region
+            contentRegion = region,
+            songsSortOrder = prefs[Keys.SONGS_SORT_ORDER]?.let { runCatching { SongSortOrder.valueOf(it) }.getOrNull() }
+                ?: SongSortOrder.DEFAULT,
+            albumsSortOrder = prefs[Keys.ALBUMS_SORT_ORDER]?.let { runCatching { AlbumSortOrder.valueOf(it) }.getOrNull() }
+                ?: AlbumSortOrder.DEFAULT,
+            artistsSortOrder = prefs[Keys.ARTISTS_SORT_ORDER]?.let { runCatching { ArtistSortOrder.valueOf(it) }.getOrNull() }
+                ?: ArtistSortOrder.DEFAULT
         )
     }
 
@@ -164,6 +176,9 @@ class PreferencesStore @Inject constructor(
             val normalizedRegion = ContentRegions.normalize(updated.contentRegion)
             prefs[Keys.CONTENT_REGION] = normalizedRegion
             cachedRegionCode = normalizedRegion
+            prefs[Keys.SONGS_SORT_ORDER] = updated.songsSortOrder.name
+            prefs[Keys.ALBUMS_SORT_ORDER] = updated.albumsSortOrder.name
+            prefs[Keys.ARTISTS_SORT_ORDER] = updated.artistsSortOrder.name
         }
     }
 }

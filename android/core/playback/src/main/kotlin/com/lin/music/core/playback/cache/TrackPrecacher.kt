@@ -296,6 +296,8 @@ class TrackPrecacher @Inject constructor(
 
     fun cacheSizeBytes(): Long = streamCache.cacheSpace
 
+    fun downloadSizeBytes(): Long = downloadCache.cacheSpace
+
     data class PrecacheStep(
         val track: Track,
         val lengthBytes: Long

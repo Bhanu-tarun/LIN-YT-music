@@ -52,6 +52,24 @@ object ContentRegions {
 
     fun allCountries(): List<ContentRegionOption> = cachedCountries
 
+    fun filterCountries(query: String): List<ContentRegionOption> {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) return allCountries()
+        return allCountries()
+            .asSequence()
+            .filter {
+                it.name.contains(trimmed, ignoreCase = true) ||
+                    it.code.startsWith(trimmed, ignoreCase = true)
+            }
+            .sortedWith(
+                compareByDescending<ContentRegionOption> { it.code.equals(trimmed, ignoreCase = true) }
+                    .thenByDescending { it.code.startsWith(trimmed, ignoreCase = true) }
+                    .thenByDescending { it.name.startsWith(trimmed, ignoreCase = true) }
+                    .thenBy { it.name.lowercase(Locale.ROOT) }
+            )
+            .toList()
+    }
+
     fun displayNameFor(code: String): String {
         val norm = normalize(code)
         val name = Locale("", norm).getDisplayCountry(Locale.ENGLISH).ifBlank { norm }

@@ -1,6 +1,7 @@
 package com.lin.music.feature.library
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -34,6 +36,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -46,6 +51,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
@@ -53,6 +59,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -65,14 +72,19 @@ import com.lin.music.core.designsystem.components.LinTagPill
 import com.lin.music.core.designsystem.components.LinTrackArtHoverOverlay
 import com.lin.music.core.designsystem.components.PreloadPreviewArtworks
 import com.lin.music.core.designsystem.components.SwipeableTrackRow
+import com.lin.music.core.designsystem.icons.LinIcons
 import com.lin.music.core.designsystem.sheets.PlaylistEditorDialog
 import com.lin.music.core.designsystem.theme.LinSharpShape
 import com.lin.music.core.designsystem.theme.LinTextStyles
 import com.lin.music.core.designsystem.theme.LinTheme
 import com.lin.music.core.designsystem.theme.linLabel
+import com.lin.music.core.model.AlbumSortOrder
 import com.lin.music.core.model.AlbumSummary
+import com.lin.music.core.model.ArtistSortOrder
 import com.lin.music.core.model.ArtistSummary
+import com.lin.music.core.model.LibrarySorter
 import com.lin.music.core.model.PlaylistSummary
+import com.lin.music.core.model.SongSortOrder
 import com.lin.music.core.model.Track
 import com.lin.music.ui.LibrarySubTab
 import com.lin.music.ui.LocalDownloadPlaylistKind
@@ -84,6 +96,12 @@ fun LibraryTabScreen(
     onSubTabChange: (LibrarySubTab) -> Unit,
     songsSubFilter: SongsSubFilter,
     onSongsSubFilterChange: (SongsSubFilter) -> Unit,
+    songsSortOrder: SongSortOrder,
+    onSongsSortOrderChange: (SongSortOrder) -> Unit,
+    albumsSortOrder: AlbumSortOrder,
+    onAlbumsSortOrderChange: (AlbumSortOrder) -> Unit,
+    artistsSortOrder: ArtistSortOrder,
+    onArtistsSortOrderChange: (ArtistSortOrder) -> Unit,
     libraryTracks: List<Track>,
     likedTracks: List<Track>,
     downloadedTracks: List<Track>,
@@ -161,6 +179,8 @@ fun LibraryTabScreen(
                 LibrarySubTab.SONGS -> SongsScreen(
                     subFilter = songsSubFilter,
                     onSubFilterChange = onSongsSubFilterChange,
+                    sortOrder = songsSortOrder,
+                    onSortOrderChange = onSongsSortOrderChange,
                     libraryTracks = libraryTracks,
                     likedTracks = likedTracks,
                     historyTracks = historyTracks,
@@ -180,11 +200,17 @@ fun LibraryTabScreen(
 
                 LibrarySubTab.ARTISTS -> ArtistsGridScreen(
                     artists = artists,
+                    sortOrder = artistsSortOrder,
+                    onSortOrderChange = onArtistsSortOrderChange,
+                    accentColor = accentColor,
                     onArtistClick = onArtistClick
                 )
 
                 LibrarySubTab.ALBUMS -> AlbumsGridScreen(
                     albums = albums,
+                    sortOrder = albumsSortOrder,
+                    onSortOrderChange = onAlbumsSortOrderChange,
+                    accentColor = accentColor,
                     activeTagFilter = activeTagFilter,
                     onTagClear = onTagClear,
                     onAlbumClick = onAlbumClick
@@ -219,6 +245,8 @@ fun LibraryTabScreen(
 fun SongsScreen(
     subFilter: SongsSubFilter,
     onSubFilterChange: (SongsSubFilter) -> Unit,
+    sortOrder: SongSortOrder,
+    onSortOrderChange: (SongSortOrder) -> Unit,
     libraryTracks: List<Track>,
     likedTracks: List<Track>,
     historyTracks: List<Track>,
@@ -246,6 +274,9 @@ fun SongsScreen(
         if (activeTagFilter == null) baseList
         else baseList.filter { activeTagFilter in it.tags }
     }
+    val sorted = remember(filtered, sortOrder) {
+        LibrarySorter.sortTracks(filtered, sortOrder)
+    }
 
     val listState = rememberLazyListState()
     var previewedKey by remember { mutableStateOf<String?>(null) }
@@ -253,6 +284,7 @@ fun SongsScreen(
     var previewCenterYPx by remember { mutableFloatStateOf(0f) }
     var boxTopInRoot by remember { mutableFloatStateOf(0f) }
     var viewportHeightPx by remember { mutableFloatStateOf(1200f) }
+    var previousSort by remember { mutableStateOf(sortOrder) }
 
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) previewedKey = null
@@ -260,13 +292,20 @@ fun SongsScreen(
     LaunchedEffect(subFilter, activeTagFilter) {
         previewedKey = null
     }
+    LaunchedEffect(sortOrder) {
+        previewedKey = null
+        if (previousSort != sortOrder) {
+            previousSort = sortOrder
+            listState.scrollToItem(0)
+        }
+    }
 
     val firstVisibleIdx by remember(listState) {
         derivedStateOf { (listState.firstVisibleItemIndex - 1).coerceAtLeast(0) }
     }
-    val preloadUrls = remember(filtered, firstVisibleIdx) {
-        val end = (firstVisibleIdx + 8).coerceAtMost(filtered.size)
-        (firstVisibleIdx until end).map { filtered[it].thumbnailUrl }
+    val preloadUrls = remember(sorted, firstVisibleIdx) {
+        val end = (firstVisibleIdx + 8).coerceAtMost(sorted.size)
+        (firstVisibleIdx until end).map { sorted[it].thumbnailUrl }
     }
     PreloadPreviewArtworks(preloadUrls, isScrolling = listState.isScrollInProgress)
 
@@ -283,39 +322,67 @@ fun SongsScreen(
             verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             item {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Column(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier
                         .padding(bottom = 12.dp)
                         .clickable { previewedKey = null }
                 ) {
-                    SongsSubFilter.entries.forEach { f ->
-                        LinTagPill(
-                            text = f.label,
-                            active = subFilter == f,
-                            onClick = { onSubFilterChange(f) }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f, fill = false)
+                        ) {
+                            SongsSubFilter.entries.forEach { f ->
+                                LinTagPill(
+                                    text = f.label,
+                                    active = subFilter == f,
+                                    onClick = { onSubFilterChange(f) }
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        LinSortMenu(
+                            options = SongSortOrder.entries,
+                            selected = sortOrder,
+                            isDefault = sortOrder == SongSortOrder.DEFAULT,
+                            labelOf = { it.label },
+                            accentColor = accentColor,
+                            onSelect = onSortOrderChange
                         )
                     }
-                    if (activeTagFilter != null) {
-                        LinTagPill(
-                            text = "#$activeTagFilter ×",
-                            active = true,
-                            onClick = { onTagClick(activeTagFilter) }
-                        )
-                    } else {
-                        distinctTags.take(6).forEach { tag ->
-                            LinTagPill(
-                                text = "#$tag",
-                                active = false,
-                                onClick = { onTagClick(tag) }
-                            )
+
+                    if (activeTagFilter != null || distinctTags.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (activeTagFilter != null) {
+                                LinTagPill(
+                                    text = "#$activeTagFilter ×",
+                                    active = true,
+                                    onClick = { onTagClick(activeTagFilter) }
+                                )
+                            } else {
+                                distinctTags.take(6).forEach { tag ->
+                                    LinTagPill(
+                                        text = "#$tag",
+                                        active = false,
+                                        onClick = { onTagClick(tag) }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            if (filtered.isEmpty()) {
+            if (sorted.isEmpty()) {
                 item {
                     Text(
                         text = linLabel("no tracks found."),
@@ -325,8 +392,8 @@ fun SongsScreen(
                     )
                 }
             } else {
-                itemsIndexed(filtered, key = { idx, t -> "${subFilter.name}_${idx}_${t.videoId}" }) { idx, track ->
-                    val rowKey = "${subFilter.name}_${idx}_${track.videoId}"
+                itemsIndexed(sorted, key = { idx, t -> "${subFilter.name}_${sortOrder.name}_${idx}_${t.videoId}" }) { idx, track ->
+                    val rowKey = "${subFilter.name}_${sortOrder.name}_${idx}_${track.videoId}"
                     var rowCenterY by remember { mutableFloatStateOf(0f) }
                     SwipeableTrackRow(
                         track = track,
@@ -348,7 +415,7 @@ fun SongsScreen(
                         },
                         onDoubleClick = {
                             previewedKey = null
-                            onPlayTracks(filtered, idx, subFilter.label)
+                            onPlayTracks(sorted, idx, subFilter.label)
                         },
                         onSwipeRightPlayNext = { onSwipeRightPlayNext(track) },
                         onSwipeLeftAddToQueue = { onSwipeLeftAddToQueue(track) },
@@ -375,8 +442,17 @@ fun SongsScreen(
             modifier = Modifier.align(Alignment.CenterEnd),
             bottomPadding = 172.dp,
             labelProvider = { idx ->
-                if (filtered.isNotEmpty()) {
-                    "${(idx - 1).coerceIn(0, filtered.lastIndex) + 1} / ${filtered.size}"
+                if (sorted.isNotEmpty()) {
+                    val itemIdx = (idx - 1).coerceIn(0, sorted.lastIndex)
+                    val track = sorted[itemIdx]
+                    val initial = when (sortOrder) {
+                        SongSortOrder.TITLE_ASC, SongSortOrder.TITLE_DESC ->
+                            track.title.trim().firstOrNull()?.uppercaseChar()?.toString()
+                        SongSortOrder.ARTIST_ASC ->
+                            if (track.artists.isNotEmpty()) track.artistDisplay.trim().firstOrNull()?.uppercaseChar()?.toString() else null
+                        else -> null
+                    }
+                    if (initial != null) "$initial · ${itemIdx + 1} / ${sorted.size}" else "${itemIdx + 1} / ${sorted.size}"
                 } else null
             }
         )
@@ -386,6 +462,9 @@ fun SongsScreen(
 @Composable
 fun ArtistsGridScreen(
     artists: List<ArtistSummary>,
+    sortOrder: ArtistSortOrder,
+    onSortOrderChange: (ArtistSortOrder) -> Unit,
+    accentColor: Color,
     onArtistClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -396,41 +475,85 @@ fun ArtistsGridScreen(
         }
         return
     }
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 180.dp),
-        horizontalArrangement = Arrangement.spacedBy(24.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp)
-    ) {
-        itemsIndexed(artists, key = { idx, it -> "art_${idx}_${it.browseId}" }) { _, artist ->
-            Column(
-                modifier = Modifier.clickable { onArtistClick(artist.browseId) },
-                horizontalAlignment = Alignment.Start
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(CircleShape)
-                        .background(linColors.glassBorder)
+    val sorted = remember(artists, sortOrder) {
+        LibrarySorter.sortArtists(artists, sortOrder)
+    }
+    val gridState = rememberLazyGridState()
+    var previousSort by remember { mutableStateOf(sortOrder) }
+    LaunchedEffect(sortOrder) {
+        if (previousSort != sortOrder) {
+            previousSort = sortOrder
+            gridState.scrollToItem(0)
+        }
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 180.dp),
+            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
+            item(span = { GridItemSpan(2) }) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (!artist.thumbnailUrl.isNullOrBlank()) {
-                        AsyncImage(
-                            model = artist.thumbnailUrl,
-                            contentDescription = artist.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
+                    Text(
+                        text = linLabel("${artists.size} ${if (artists.size == 1) "artist" else "artists"}"),
+                        style = LinTextStyles.tagPill,
+                        color = linColors.textSecondary
+                    )
+                    LinSortMenu(
+                        options = ArtistSortOrder.entries,
+                        selected = sortOrder,
+                        isDefault = sortOrder == ArtistSortOrder.DEFAULT,
+                        labelOf = { it.label },
+                        accentColor = accentColor,
+                        onSelect = onSortOrderChange
+                    )
                 }
-                Spacer(Modifier.height(10.dp))
-                Text(artist.name, style = LinTextStyles.navItemActive, color = linColors.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                artist.subscriberCount?.let {
-                    Text(it, style = LinTextStyles.subtitle, color = linColors.textSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+
+            itemsIndexed(sorted, key = { idx, it -> "art_${sortOrder.name}_${idx}_${it.browseId}" }) { _, artist ->
+                Column(
+                    modifier = Modifier.clickable { onArtistClick(artist.browseId) },
+                    horizontalAlignment = Alignment.Start
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(1f)
+                            .clip(CircleShape)
+                            .background(linColors.glassBorder)
+                    ) {
+                        if (!artist.thumbnailUrl.isNullOrBlank()) {
+                            AsyncImage(
+                                model = artist.thumbnailUrl,
+                                contentDescription = artist.name,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(artist.name, style = LinTextStyles.navItemActive, color = linColors.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    artist.subscriberCount?.let {
+                        Text(it, style = LinTextStyles.subtitle, color = linColors.textSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
         }
+
+        LinLazyGridScrollbar(
+            gridState = gridState,
+            accentColor = accentColor,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            bottomPadding = 172.dp
+        )
     }
 }
 
@@ -443,6 +566,9 @@ private enum class AlbumSubFilter(val label: String) {
 @Composable
 fun AlbumsGridScreen(
     albums: List<AlbumSummary>,
+    sortOrder: AlbumSortOrder,
+    onSortOrderChange: (AlbumSortOrder) -> Unit,
+    accentColor: Color,
     activeTagFilter: String?,
     onTagClear: () -> Unit,
     onAlbumClick: (String) -> Unit,
@@ -457,65 +583,190 @@ fun AlbumsGridScreen(
                 (activeTagFilter == null || activeTagFilter in alb.tags)
         }
     }
+    val sorted = remember(filtered, sortOrder) {
+        LibrarySorter.sortAlbums(filtered, sortOrder)
+    }
+    val gridState = rememberLazyGridState()
+    var previousSort by remember { mutableStateOf(sortOrder) }
+    LaunchedEffect(sortOrder) {
+        if (previousSort != sortOrder) {
+            previousSort = sortOrder
+            gridState.scrollToItem(0)
+        }
+    }
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 180.dp),
-        horizontalArrangement = Arrangement.spacedBy(20.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp)
-    ) {
-        item(span = { GridItemSpan(2) }) {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                AlbumSubFilter.entries.forEach { f ->
-                    LinTagPill(f.label, active = albumFilter == f, onClick = { albumFilter = f })
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 180.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
+            item(span = { GridItemSpan(2) }) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f, fill = false)
+                        ) {
+                            AlbumSubFilter.entries.forEach { f ->
+                                LinTagPill(f.label, active = albumFilter == f, onClick = { albumFilter = f })
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        LinSortMenu(
+                            options = AlbumSortOrder.entries,
+                            selected = sortOrder,
+                            isDefault = sortOrder == AlbumSortOrder.DEFAULT,
+                            labelOf = { it.label },
+                            accentColor = accentColor,
+                            onSelect = onSortOrderChange
+                        )
+                    }
+                    if (activeTagFilter != null) {
+                        LinTagPill("#$activeTagFilter ×", active = true, onClick = onTagClear)
+                    }
                 }
-                if (activeTagFilter != null) {
-                    LinTagPill("#$activeTagFilter ×", active = true, onClick = onTagClear)
+            }
+
+            if (sorted.isEmpty()) {
+                item(span = { GridItemSpan(2) }) {
+                    Text(
+                        text = linLabel("no saved albums yet."),
+                        style = LinTextStyles.sectionHeading,
+                        color = linColors.textSecondary
+                    )
+                }
+            } else {
+                itemsIndexed(sorted, key = { idx, it -> "alb_${sortOrder.name}_${idx}_${it.browseId}" }) { _, album ->
+                    Column(modifier = Modifier.clickable { onAlbumClick(album.browseId) }) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(1f)
+                                .clip(LinSharpShape)
+                                .background(linColors.glassBorder)
+                        ) {
+                            if (!album.thumbnailUrl.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = album.thumbnailUrl,
+                                    contentDescription = album.title,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Text(album.title, style = LinTextStyles.navItemActive, color = linColors.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            text = album.artistDisplay.ifBlank { linLabel(if (album.isEpOrSingle) "EP" else "Album") },
+                            style = LinTextStyles.subtitle,
+                            color = linColors.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }
 
-        if (filtered.isEmpty()) {
-            item(span = { GridItemSpan(2) }) {
-                Text(
-                    text = linLabel("no saved albums yet."),
-                    style = LinTextStyles.sectionHeading,
-                    color = linColors.textSecondary
+        LinLazyGridScrollbar(
+            gridState = gridState,
+            accentColor = accentColor,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            bottomPadding = 172.dp
+        )
+    }
+}
+
+@Composable
+private fun <T> LinSortMenu(
+    options: List<T>,
+    selected: T,
+    isDefault: Boolean,
+    labelOf: (T) -> String,
+    accentColor: Color,
+    onSelect: (T) -> Unit
+) {
+    val linColors = LinTheme.colors
+    var expanded by remember { mutableStateOf(false) }
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        label = "sortMenuChevron"
+    )
+    Box {
+        Row(
+            modifier = Modifier
+                .border(
+                    1.dp,
+                    if (!isDefault || expanded) accentColor else linColors.textPrimary.copy(alpha = 0.25f)
                 )
-            }
-        } else {
-            itemsIndexed(filtered, key = { idx, it -> "alb_${idx}_${it.browseId}" }) { _, album ->
-                Column(modifier = Modifier.clickable { onAlbumClick(album.browseId) }) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(1f)
-                            .clip(LinSharpShape)
-                            .background(linColors.glassBorder)
-                    ) {
-                        if (!album.thumbnailUrl.isNullOrBlank()) {
-                            AsyncImage(
-                                model = album.thumbnailUrl,
-                                contentDescription = album.title,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
+                .background(if (!isDefault) accentColor.copy(alpha = 0.10f) else Color.Transparent)
+                .clickable { expanded = true }
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = linLabel("sort: ${labelOf(selected)}"),
+                style = LinTextStyles.tagPill,
+                color = if (!isDefault) accentColor else linColors.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                imageVector = LinIcons.ChevronDown,
+                contentDescription = "Sort options",
+                tint = if (!isDefault || expanded) accentColor else linColors.textSecondary,
+                modifier = Modifier
+                    .size(13.dp)
+                    .rotate(chevronRotation)
+            )
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .background(linColors.background)
+                .border(1.dp, linColors.textPrimary.copy(alpha = 0.28f))
+        ) {
+            options.forEach { option ->
+                val isSelected = option == selected
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = linLabel(labelOf(option)),
+                            style = if (isSelected) {
+                                LinTextStyles.subtitle.copy(fontWeight = FontWeight.SemiBold)
+                            } else {
+                                LinTextStyles.subtitle
+                            },
+                            color = if (isSelected) accentColor else linColors.textPrimary
+                        )
+                    },
+                    trailingIcon = if (isSelected) {
+                        {
+                            Icon(
+                                imageVector = LinIcons.Check,
+                                contentDescription = null,
+                                tint = accentColor,
+                                modifier = Modifier.size(15.dp)
                             )
                         }
+                    } else null,
+                    onClick = {
+                        expanded = false
+                        onSelect(option)
                     }
-                    Spacer(Modifier.height(10.dp))
-                    Text(album.title, style = LinTextStyles.navItemActive, color = linColors.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        text = album.artistDisplay.ifBlank { linLabel(if (album.isEpOrSingle) "EP" else "Album") },
-                        style = LinTextStyles.subtitle,
-                        color = linColors.textSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                )
             }
         }
     }

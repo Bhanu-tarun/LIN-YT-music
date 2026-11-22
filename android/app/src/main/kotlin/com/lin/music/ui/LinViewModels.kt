@@ -19,11 +19,13 @@ import com.lin.music.core.designsystem.components.highResArtworkUrl
 import com.lin.music.core.innertube.InnerTubeApi
 import com.lin.music.core.model.AccountSession
 import com.lin.music.core.model.AlbumDetail
+import com.lin.music.core.model.AlbumSortOrder
 import com.lin.music.core.model.AlbumSummary
 import com.lin.music.core.model.AmbientMode
 import com.lin.music.core.model.AmbientReactivity
 import com.lin.music.core.model.ArtistDetail
 import com.lin.music.core.model.ArtistRef
+import com.lin.music.core.model.ArtistSortOrder
 import com.lin.music.core.model.AudioQuality
 import com.lin.music.core.model.ContentRegions
 import com.lin.music.core.model.HomeItem
@@ -33,6 +35,7 @@ import com.lin.music.core.model.PlaylistDetail
 import com.lin.music.core.model.PlaylistSummary
 import com.lin.music.core.model.SearchFilter
 import com.lin.music.core.model.SearchResultPage
+import com.lin.music.core.model.SongSortOrder
 import com.lin.music.core.model.SpeedDialEntry
 import com.lin.music.core.model.Track
 import com.lin.music.core.model.TrackArtworkPalette
@@ -1098,7 +1101,8 @@ enum class SongsSubFilter(val label: String) {
 
 @HiltViewModel
 class LibraryViewModel @Inject constructor(
-    private val repository: MusicRepository
+    private val repository: MusicRepository,
+    private val preferencesStore: PreferencesStore
 ) : ViewModel() {
     val libraryTracks: StateFlow<List<Track>> = repository.observeLibraryTracks()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
@@ -1128,6 +1132,24 @@ class LibraryViewModel @Inject constructor(
     val syncError: StateFlow<String?> = _syncError.asStateFlow()
 
     private val lastTabRefreshMs = mutableMapOf<String, Long>()
+
+    fun setSongsSortOrder(order: SongSortOrder) {
+        viewModelScope.launch {
+            preferencesStore.update { it.copy(songsSortOrder = order) }
+        }
+    }
+
+    fun setAlbumsSortOrder(order: AlbumSortOrder) {
+        viewModelScope.launch {
+            preferencesStore.update { it.copy(albumsSortOrder = order) }
+        }
+    }
+
+    fun setArtistsSortOrder(order: ArtistSortOrder) {
+        viewModelScope.launch {
+            preferencesStore.update { it.copy(artistsSortOrder = order) }
+        }
+    }
 
     fun refreshForTab(
         tab: MainTab,
@@ -1510,6 +1532,8 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun cacheSizeBytes(): Long = trackPrecacher.cacheSizeBytes()
+
+    fun downloadSizeBytes(): Long = trackPrecacher.downloadSizeBytes()
 
     suspend fun exportBackup(): String = repository.exportBackupJson()
     suspend fun importBackup(json: String): Result<Unit> = repository.importBackupJson(json)
