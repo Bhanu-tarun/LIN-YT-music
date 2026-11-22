@@ -297,3 +297,23 @@ data class SpeedDialPinEntity(
         )
     }.getOrNull()
 }
+
+@Entity(
+    tableName = "play_sessions",
+    indices = [
+        Index(value = ["playedAtMs"]),
+        Index(value = ["videoId", "playedAtMs"])
+    ]
+)
+data class PlaySessionEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val videoId: String,
+    val listenedMs: Long,
+    val playedAtMs: Long = System.currentTimeMillis()
+)
+
+data class TrackListenStat(
+    val videoId: String,
+    val totalListenedMs: Long,
+    val lastPlayedAtMs: Long
+)

@@ -87,11 +87,25 @@ object DataModule {
         }
     }
 
+    private val MIGRATION_6_7 = object : Migration(6, 7) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `play_sessions` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `videoId` TEXT NOT NULL, `listenedMs` INTEGER NOT NULL, `playedAtMs` INTEGER NOT NULL)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_play_sessions_playedAtMs` ON `play_sessions` (`playedAtMs`)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_play_sessions_videoId_playedAtMs` ON `play_sessions` (`videoId`, `playedAtMs`)"
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): LinDatabase =
         Room.databaseBuilder(context, LinDatabase::class.java, "lin_music.db")
-            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
             .fallbackToDestructiveMigration()
             .build()
 

@@ -1447,6 +1447,12 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun syncRecentlyPlayedDownloadsNow() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { smartDownloadManager.syncRecentlyPlayedDownloads(force = true) }
+        }
+    }
+
     suspend fun clearStreamCache(): Long = trackPrecacher.clearNonDownloadedStreamCache()
 
     fun deleteAllDownloads() {

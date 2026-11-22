@@ -11,6 +11,7 @@ import com.lin.music.core.data.database.CacheDao
 import com.lin.music.core.data.database.DownloadEntity
 import com.lin.music.core.data.database.TrackDao
 import com.lin.music.core.data.database.TrackEntity
+import com.lin.music.core.data.database.TrackListenStat
 import com.lin.music.core.data.datastore.PreferencesStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.sync.Mutex
@@ -23,7 +24,8 @@ import javax.inject.Singleton
  * - Smart Downloads: refreshes at most once per 24h when eligible (battery >= 20% or charging,
  *   not in Power Saver mode, unmetered Wi-Fi when wifi-only is enabled), keeping downloads sticky
  *   for 7 days with score hysteresis and a 15% daily rotation cap.
- * - Recently Played Downloads: decoupled rolling window (30m cooldown on automatic updates).
+ * - Recently Played Downloads: refreshes once every 24h when eligible, ranking songs from the
+ *   last 24 hours first by cumulative listen time descending (then 7d listen time & history fallback).
  */
 @Singleton
 class SmartDownloadManager @Inject constructor(
@@ -152,12 +154,36 @@ class SmartDownloadManager @Inject constructor(
             if (lastSync > 0L && (nowMs - lastSync) < RECENT_SYNC_INTERVAL_MS) {
                 return
             }
-            if (!isEligibleForAutoDownload(requireUnmetered = wifiOnly, minBatteryPct = 15)) {
+            if (!isEligibleForAutoDownload(requireUnmetered = wifiOnly, minBatteryPct = 20)) {
                 return
             }
         }
 
-        val candidates = trackDao.getRecentlyPlayedCandidates(limit.coerceIn(1, 200))
+        val clampedLimit = limit.coerceIn(1, 200)
+        val fetchLimit = (clampedLimit * 2).coerceAtMost(500)
+        val stats24h = cacheDao.getListenStatsSince(nowMs - RECENT_PRIMARY_WINDOW_MS, fetchLimit)
+        val stats7d = cacheDao.getListenStatsSince(nowMs - RECENT_FALLBACK_WINDOW_MS, fetchLimit)
+        val statIds = (stats24h.map { it.videoId } + stats7d.map { it.videoId })
+            .distinct()
+            .take(500)
+        val tracksById = if (statIds.isNotEmpty()) {
+            trackDao.getByIds(statIds).associateBy { it.videoId }
+        } else {
+            emptyMap()
+        }
+        val fallbackHistory = if (tracksById.size < clampedLimit) {
+            trackDao.getRecentlyPlayedCandidates(clampedLimit)
+        } else {
+            emptyList()
+        }
+
+        val candidates = selectRecentlyPlayedTracks(
+            stats24h = stats24h,
+            stats7d = stats7d,
+            tracksById = tracksById,
+            fallbackHistory = fallbackHistory,
+            limit = clampedLimit
+        )
         val desiredIds = candidates.map { it.videoId }.toSet()
 
         currentRecent
@@ -181,6 +207,7 @@ class SmartDownloadManager @Inject constructor(
                 )
             }
         }
+        cacheDao.prunePlaySessionsBefore(nowMs - PLAY_SESSION_RETENTION_MS)
         preferencesStore.setLastRecentDownloadSyncMs(nowMs)
     }
 
@@ -219,11 +246,58 @@ class SmartDownloadManager @Inject constructor(
 
     companion object {
         const val SMART_SYNC_INTERVAL_MS = 24L * 60L * 60_000L
-        const val RECENT_SYNC_INTERVAL_MS = 30L * 60_000L
+        const val RECENT_SYNC_INTERVAL_MS = 24L * 60L * 60_000L
+        const val RECENT_PRIMARY_WINDOW_MS = 24L * 60L * 60_000L
+        const val RECENT_FALLBACK_WINDOW_MS = 7L * 24L * 60L * 60_000L
+        const val PLAY_SESSION_RETENTION_MS = 14L * 24L * 60L * 60_000L
         const val RETENTION_WINDOW_MS = 7L * 24L * 60L * 60_000L
         const val MAX_ROTATION_FRACTION = 0.15
         const val HYSTERESIS_RATIO = 1.35
         const val HYSTERESIS_MIN_DELTA = 10.0
+
+        fun selectRecentlyPlayedTracks(
+            stats24h: List<TrackListenStat>,
+            stats7d: List<TrackListenStat>,
+            tracksById: Map<String, TrackEntity>,
+            fallbackHistory: List<TrackEntity>,
+            limit: Int
+        ): List<TrackEntity> {
+            val clampedLimit = limit.coerceIn(1, 200)
+            val selected = ArrayList<TrackEntity>(clampedLimit)
+            val seenIds = HashSet<String>(clampedLimit * 2)
+
+            fun appendSorted(stats: List<TrackListenStat>) {
+                if (selected.size >= clampedLimit) return
+                stats
+                    .sortedWith(
+                        compareByDescending<TrackListenStat> { it.totalListenedMs }
+                            .thenByDescending { it.lastPlayedAtMs }
+                    )
+                    .forEach { stat ->
+                        if (selected.size >= clampedLimit) return@forEach
+                        tracksById[stat.videoId]?.let { entity ->
+                            if (seenIds.add(stat.videoId)) {
+                                selected += entity
+                            }
+                        }
+                    }
+            }
+
+            // Tier 1: last 24h first, ordered by longest total listening time.
+            appendSorted(stats24h)
+            // Tier 2: fill any spare capacity from the past 7 days by listen time.
+            appendSorted(stats7d)
+            // Tier 3: fall back to recency history if listen sessions have not filled the cap yet.
+            if (selected.size < clampedLimit) {
+                fallbackHistory.forEach { entity ->
+                    if (selected.size >= clampedLimit) return@forEach
+                    if (seenIds.add(entity.videoId)) {
+                        selected += entity
+                    }
+                }
+            }
+            return selected
+        }
 
         fun scoreSmartCandidate(
             entity: TrackEntity,

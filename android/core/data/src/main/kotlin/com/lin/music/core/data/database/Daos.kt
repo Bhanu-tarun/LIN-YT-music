@@ -251,4 +251,22 @@ interface CacheDao {
 
     @Query("DELETE FROM speed_dial_pins WHERE `key` = :key")
     suspend fun deleteSpeedDialPin(key: String)
+
+    @Insert
+    suspend fun insertPlaySession(session: PlaySessionEntity)
+
+    @Query(
+        """
+        SELECT videoId, SUM(listenedMs) AS totalListenedMs, MAX(playedAtMs) AS lastPlayedAtMs
+        FROM play_sessions
+        WHERE playedAtMs >= :sinceMs
+        GROUP BY videoId
+        ORDER BY totalListenedMs DESC, lastPlayedAtMs DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getListenStatsSince(sinceMs: Long, limit: Int): List<TrackListenStat>
+
+    @Query("DELETE FROM play_sessions WHERE playedAtMs < :beforeMs")
+    suspend fun prunePlaySessionsBefore(beforeMs: Long)
 }

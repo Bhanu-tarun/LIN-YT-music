@@ -6,6 +6,7 @@ import com.lin.music.core.data.database.CacheDao
 import com.lin.music.core.data.database.DownloadEntity
 import com.lin.music.core.data.database.ItemTagEntity
 import com.lin.music.core.data.database.LyricsCacheEntity
+import com.lin.music.core.data.database.PlaySessionEntity
 import com.lin.music.core.data.database.PlaylistDao
 import com.lin.music.core.data.database.PlaylistEntity
 import com.lin.music.core.data.database.PlaylistTrackCrossRef
@@ -383,6 +384,35 @@ class MusicRepository @Inject constructor(
                 feedbackTokenRemove = base.feedbackTokenRemove ?: existing?.feedbackTokenRemove
             )
         )
+    }
+
+    suspend fun recordListenSession(track: Track, listenedMs: Long) {
+        if (listenedMs <= 0L) return
+        val now = System.currentTimeMillis()
+        cacheDao.insertPlaySession(
+            PlaySessionEntity(
+                videoId = track.videoId,
+                listenedMs = listenedMs,
+                playedAtMs = now
+            )
+        )
+        val existing = trackDao.getById(track.videoId)
+        if (existing == null) {
+            trackDao.upsert(
+                track.toEntity(
+                    inHistory = true,
+                    historyTimestampMs = now,
+                    playCount = 0
+                )
+            )
+        } else {
+            trackDao.upsert(
+                existing.copy(
+                    inHistory = true,
+                    historyTimestampMs = maxOf(existing.historyTimestampMs, now)
+                )
+            )
+        }
     }
 
     suspend fun getTrackCachedState(videoId: String): Track? = trackDao.getById(videoId)?.toModel()

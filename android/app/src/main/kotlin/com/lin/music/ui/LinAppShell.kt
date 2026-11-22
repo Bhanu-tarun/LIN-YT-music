@@ -497,6 +497,7 @@ fun LinAppShell(
                                         onSetRecentlyPlayedDownloadsEnabled = settingsViewModel::setRecentlyPlayedDownloadsEnabled,
                                         onSetRecentlyPlayedDownloadsLimit = settingsViewModel::setRecentlyPlayedDownloadsLimit,
                                         onSyncSmartDownloadsNow = settingsViewModel::syncSmartDownloadsNow,
+                                        onSyncRecentlyPlayedDownloadsNow = settingsViewModel::syncRecentlyPlayedDownloadsNow,
                                         onClearStreamCache = settingsViewModel::clearStreamCache,
                                         onDeleteAllDownloads = settingsViewModel::deleteAllDownloads,
                                         onSetNormalizeVolume = settingsViewModel::setNormalizeVolume,

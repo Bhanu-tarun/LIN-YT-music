@@ -69,6 +69,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -119,6 +120,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
     private var qualifiedPlayVideoId: String? = null
     private var qualifiedPlayRecorded: Boolean = false
     private var qualifiedPlayAccumulatedMs: Long = 0L
+    private var qualifiedPlayFlushedMs: Long = 0L
     private var qualifiedPlaySegmentStartMs: Long = 0L
     private var sleepFadeMultiplier: Float = 1f
     private var normalizationGainMultiplier: Float = 1f
@@ -450,13 +452,36 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
         }
     }
 
+    private fun flushListenSessionIfNeeded(immediateOnDestroy: Boolean = false) {
+        val track = qualifiedPlayTrack ?: return
+        if (qualifiedPlaySegmentStartMs > 0L) {
+            val elapsed = (android.os.SystemClock.elapsedRealtime() - qualifiedPlaySegmentStartMs).coerceAtLeast(0L)
+            qualifiedPlayAccumulatedMs += elapsed
+            qualifiedPlaySegmentStartMs = 0L
+        }
+        val deltaMs = (qualifiedPlayAccumulatedMs - qualifiedPlayFlushedMs).coerceAtLeast(0L)
+        if (deltaMs < MIN_LISTEN_SESSION_MS) return
+        qualifiedPlayFlushedMs = qualifiedPlayAccumulatedMs
+        if (immediateOnDestroy) {
+            runBlocking(Dispatchers.IO) {
+                runCatching { musicRepository.recordListenSession(track, deltaMs) }
+            }
+        } else {
+            serviceScope.launch(Dispatchers.IO) {
+                runCatching { musicRepository.recordListenSession(track, deltaMs) }
+            }
+        }
+    }
+
     private fun resetQualifiedPlayTracking(track: Track?) {
         qualifiedPlayJob?.cancel()
         qualifiedPlayJob = null
+        flushListenSessionIfNeeded(immediateOnDestroy = false)
         qualifiedPlayTrack = track
         qualifiedPlayVideoId = track?.videoId
         qualifiedPlayRecorded = false
         qualifiedPlayAccumulatedMs = 0L
+        qualifiedPlayFlushedMs = 0L
         qualifiedPlaySegmentStartMs = 0L
         if (track != null && player.isPlaying) {
             resumeQualifiedPlayTimer()
@@ -466,16 +491,16 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
     private fun pauseQualifiedPlayTimer() {
         qualifiedPlayJob?.cancel()
         qualifiedPlayJob = null
-        if (qualifiedPlaySegmentStartMs > 0L) {
-            val elapsed = (android.os.SystemClock.elapsedRealtime() - qualifiedPlaySegmentStartMs).coerceAtLeast(0L)
-            qualifiedPlayAccumulatedMs += elapsed
-            qualifiedPlaySegmentStartMs = 0L
-        }
+        flushListenSessionIfNeeded(immediateOnDestroy = false)
     }
 
     private fun resumeQualifiedPlayTimer() {
         val track = qualifiedPlayTrack ?: return
-        if (qualifiedPlayRecorded || !player.isPlaying || qualifiedPlayJob?.isActive == true) return
+        if (!player.isPlaying) return
+        if (qualifiedPlaySegmentStartMs == 0L) {
+            qualifiedPlaySegmentStartMs = android.os.SystemClock.elapsedRealtime()
+        }
+        if (qualifiedPlayRecorded || qualifiedPlayJob?.isActive == true) return
         val dur = if (player.duration > 0L) player.duration else track.durationMs
         val thresholdMs = if (dur > 0L) {
             minOf(QUALIFIED_PLAY_MIN_MS, (dur / 2L).coerceAtLeast(8_000L))
@@ -483,7 +508,6 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
             QUALIFIED_PLAY_MIN_MS
         }
         val remainingMs = (thresholdMs - qualifiedPlayAccumulatedMs).coerceAtLeast(0L)
-        qualifiedPlaySegmentStartMs = android.os.SystemClock.elapsedRealtime()
         qualifiedPlayJob = serviceScope.launch {
             if (remainingMs > 0L) {
                 delay(remainingMs)
@@ -492,7 +516,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                 return@launch
             }
             qualifiedPlayRecorded = true
-            qualifiedPlaySegmentStartMs = 0L
+            // Keep qualifiedPlaySegmentStartMs active so total listen time accrues beyond the 20s mark.
             val now = System.currentTimeMillis()
             val shouldRecord = track.videoId != lastRecordedPlayVideoId || (now - lastRecordedPlayAtMs > 10_000L)
             if (shouldRecord) {
@@ -500,7 +524,6 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                 lastRecordedPlayAtMs = now
                 withContext(Dispatchers.IO) {
                     runCatching { musicRepository.recordTrackPlayed(track) }
-                    runCatching { smartDownloadManager.syncRecentlyPlayedDownloads(force = false) }
                 }
             }
         }
@@ -788,6 +811,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
         }
         precacheKickoffJob?.cancel()
         qualifiedPlayJob?.cancel()
+        flushListenSessionIfNeeded(immediateOnDestroy = true)
         persistQueueJob?.cancel()
         stateHub.serviceTimerBridge = null
         positionTickerJob?.cancel()
@@ -835,6 +859,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
         const val CMD_TOGGLE_LIKE = "com.lin.music.CMD_TOGGLE_LIKE"
         const val CMD_TOGGLE_SHUFFLE = "com.lin.music.CMD_TOGGLE_SHUFFLE"
         private const val QUALIFIED_PLAY_MIN_MS = 20_000L
+        private const val MIN_LISTEN_SESSION_MS = 5_000L
 
         fun Track.toMediaItem(): MediaItem {
             val metadata = MediaMetadata.Builder()

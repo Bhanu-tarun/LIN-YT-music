@@ -73,6 +73,7 @@ fun SettingsScreen(
     onSetRecentlyPlayedDownloadsEnabled: (Boolean) -> Unit,
     onSetRecentlyPlayedDownloadsLimit: (Int) -> Unit,
     onSyncSmartDownloadsNow: () -> Unit,
+    onSyncRecentlyPlayedDownloadsNow: () -> Unit,
     onClearStreamCache: suspend () -> Long,
     onDeleteAllDownloads: () -> Unit,
     onSetNormalizeVolume: (Boolean) -> Unit,
@@ -204,7 +205,7 @@ fun SettingsScreen(
                     onCheckedChange = onSetRecentlyPlayedDownloadsEnabled
                 )
                 Text(
-                    text = linLabel("auto-download most recently played tracks"),
+                    text = linLabel("24h refresh · longest listened last 24h first up to cap"),
                     style = LinTextStyles.subtitle,
                     color = linColors.textSecondary
                 )
@@ -218,6 +219,13 @@ fun SettingsScreen(
                             )
                         }
                     }
+                    LinOutlinedButton(
+                        text = "sync recently played",
+                        onClick = {
+                            onSyncRecentlyPlayedDownloadsNow()
+                            onToast("syncing recently played downloads")
+                        }
+                    )
                 }
 
                 val cacheMb = displayedCacheBytes / (1024L * 1024L)
