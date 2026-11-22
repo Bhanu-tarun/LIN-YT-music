@@ -103,7 +103,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private var positionTickerJob: Job? = null
     private var precacheKickoffJob: Job? = null
-    private var smartDownloadSyncJob: Job? = null
+    private var qualifiedPlayJob: Job? = null
     private var persistQueueJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var lastNetworkHandle: Long? = null
@@ -115,7 +115,11 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
     private var lastRetriedVideoId: String? = null
     private var lastRecordedPlayVideoId: String? = null
     private var lastRecordedPlayAtMs: Long = 0L
-    private var lastSmartDownloadAutoSyncMs: Long = 0L
+    private var qualifiedPlayTrack: Track? = null
+    private var qualifiedPlayVideoId: String? = null
+    private var qualifiedPlayRecorded: Boolean = false
+    private var qualifiedPlayAccumulatedMs: Long = 0L
+    private var qualifiedPlaySegmentStartMs: Long = 0L
     private var sleepFadeMultiplier: Float = 1f
     private var normalizationGainMultiplier: Float = 1f
 
@@ -236,8 +240,10 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                     evaluatePlaybackHealthForPrecache()
                     scheduleFastPrecacheCheck()
                     ensurePositionTickerRunning()
+                    resumeQualifiedPlayTimer()
                 } else {
                     precacheKickoffJob?.cancel()
+                    pauseQualifiedPlayTimer()
                     healthyForPrecache = false
                     stopPositionTicker()
                     stateHub.reactiveAudioProcessor.resetEnergy()
@@ -265,6 +271,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                     }
                     Player.STATE_IDLE, Player.STATE_ENDED -> {
                         precacheKickoffJob?.cancel()
+                        pauseQualifiedPlayTimer()
                         readySinceMs = 0L
                         healthyForPrecache = false
                         stopPositionTicker()
@@ -282,6 +289,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                         if (player.isPlaying) {
                             scheduleFastPrecacheCheck()
                             ensurePositionTickerRunning()
+                            resumeQualifiedPlayTimer()
                         }
                     }
                 }
@@ -421,35 +429,9 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
             }
         }
         applyLoudnessForCurrentTrack()
+        resetQualifiedPlayTracking(track)
 
-        val now = System.currentTimeMillis()
-        val shouldRecordPlay = track.videoId != lastRecordedPlayVideoId || (now - lastRecordedPlayAtMs > 10_000L)
-        if (shouldRecordPlay) {
-            lastRecordedPlayVideoId = track.videoId
-            lastRecordedPlayAtMs = now
-        }
-        smartDownloadSyncJob?.cancel()
-        smartDownloadSyncJob = serviceScope.launch {
-            delay(10_000L)
-            val prefs = preferencesStore.current()
-            if (!prefs.smartDownloadsEnabled && !prefs.recentlyPlayedDownloadsEnabled) {
-                return@launch
-            }
-            val nowMs = System.currentTimeMillis()
-            if (nowMs - lastSmartDownloadAutoSyncMs < SMART_DOWNLOAD_AUTO_SYNC_COOLDOWN_MS) {
-                return@launch
-            }
-            if (player.playbackState != Player.STATE_BUFFERING) {
-                lastSmartDownloadAutoSyncMs = nowMs
-                withContext(Dispatchers.IO) {
-                    runCatching { smartDownloadManager.syncAll() }
-                }
-            }
-        }
         serviceScope.launch(Dispatchers.IO) {
-            if (shouldRecordPlay) {
-                runCatching { musicRepository.recordTrackPlayed(track) }
-            }
             val cached = runCatching { musicRepository.getTrackCachedState(track.videoId) }.getOrNull()
             if (cached != null) {
                 val hydrated = track.copy(
@@ -463,6 +445,62 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
                     kotlinx.coroutines.withContext(Dispatchers.Main.immediate) {
                         stateHub.updateTrackMetadata(hydrated)
                     }
+                }
+            }
+        }
+    }
+
+    private fun resetQualifiedPlayTracking(track: Track?) {
+        qualifiedPlayJob?.cancel()
+        qualifiedPlayJob = null
+        qualifiedPlayTrack = track
+        qualifiedPlayVideoId = track?.videoId
+        qualifiedPlayRecorded = false
+        qualifiedPlayAccumulatedMs = 0L
+        qualifiedPlaySegmentStartMs = 0L
+        if (track != null && player.isPlaying) {
+            resumeQualifiedPlayTimer()
+        }
+    }
+
+    private fun pauseQualifiedPlayTimer() {
+        qualifiedPlayJob?.cancel()
+        qualifiedPlayJob = null
+        if (qualifiedPlaySegmentStartMs > 0L) {
+            val elapsed = (android.os.SystemClock.elapsedRealtime() - qualifiedPlaySegmentStartMs).coerceAtLeast(0L)
+            qualifiedPlayAccumulatedMs += elapsed
+            qualifiedPlaySegmentStartMs = 0L
+        }
+    }
+
+    private fun resumeQualifiedPlayTimer() {
+        val track = qualifiedPlayTrack ?: return
+        if (qualifiedPlayRecorded || !player.isPlaying || qualifiedPlayJob?.isActive == true) return
+        val dur = if (player.duration > 0L) player.duration else track.durationMs
+        val thresholdMs = if (dur > 0L) {
+            minOf(QUALIFIED_PLAY_MIN_MS, (dur / 2L).coerceAtLeast(8_000L))
+        } else {
+            QUALIFIED_PLAY_MIN_MS
+        }
+        val remainingMs = (thresholdMs - qualifiedPlayAccumulatedMs).coerceAtLeast(0L)
+        qualifiedPlaySegmentStartMs = android.os.SystemClock.elapsedRealtime()
+        qualifiedPlayJob = serviceScope.launch {
+            if (remainingMs > 0L) {
+                delay(remainingMs)
+            }
+            if (!player.isPlaying || qualifiedPlayRecorded || qualifiedPlayVideoId != track.videoId) {
+                return@launch
+            }
+            qualifiedPlayRecorded = true
+            qualifiedPlaySegmentStartMs = 0L
+            val now = System.currentTimeMillis()
+            val shouldRecord = track.videoId != lastRecordedPlayVideoId || (now - lastRecordedPlayAtMs > 10_000L)
+            if (shouldRecord) {
+                lastRecordedPlayVideoId = track.videoId
+                lastRecordedPlayAtMs = now
+                withContext(Dispatchers.IO) {
+                    runCatching { musicRepository.recordTrackPlayed(track) }
+                    runCatching { smartDownloadManager.syncRecentlyPlayedDownloads(force = false) }
                 }
             }
         }
@@ -748,8 +786,8 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
             networkCallback = null
         }
-        smartDownloadSyncJob?.cancel()
         precacheKickoffJob?.cancel()
+        qualifiedPlayJob?.cancel()
         persistQueueJob?.cancel()
         stateHub.serviceTimerBridge = null
         positionTickerJob?.cancel()
@@ -796,7 +834,7 @@ class LinPlaybackService : MediaLibraryService(), PlaybackStateHub.ServiceTimerB
     companion object {
         const val CMD_TOGGLE_LIKE = "com.lin.music.CMD_TOGGLE_LIKE"
         const val CMD_TOGGLE_SHUFFLE = "com.lin.music.CMD_TOGGLE_SHUFFLE"
-        private const val SMART_DOWNLOAD_AUTO_SYNC_COOLDOWN_MS = 10 * 60_000L
+        private const val QUALIFIED_PLAY_MIN_MS = 20_000L
 
         fun Track.toMediaItem(): MediaItem {
             val metadata = MediaMetadata.Builder()

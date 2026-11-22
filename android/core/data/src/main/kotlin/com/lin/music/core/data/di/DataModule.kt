@@ -79,11 +79,19 @@ object DataModule {
         }
     }
 
+    private val MIGRATION_5_6 = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `speed_dial_pins` (`key` TEXT NOT NULL, `itemJson` TEXT NOT NULL, `pinnedAtMs` INTEGER NOT NULL, PRIMARY KEY(`key`))"
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): LinDatabase =
         Room.databaseBuilder(context, LinDatabase::class.java, "lin_music.db")
-            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .fallbackToDestructiveMigration()
             .build()
 

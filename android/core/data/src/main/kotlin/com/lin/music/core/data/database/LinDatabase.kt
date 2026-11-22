@@ -15,9 +15,10 @@ import androidx.room.RoomDatabase
         DownloadEntity::class,
         SearchHistoryEntity::class,
         PersistedQueueEntity::class,
-        LyricsCacheEntity::class
+        LyricsCacheEntity::class,
+        SpeedDialPinEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class LinDatabase : RoomDatabase() {

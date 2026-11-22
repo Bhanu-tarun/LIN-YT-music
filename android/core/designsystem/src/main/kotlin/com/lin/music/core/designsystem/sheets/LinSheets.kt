@@ -83,7 +83,9 @@ fun TrackActionSheet(
     onManageTags: () -> Unit,
     onShare: () -> Unit,
     onShareAtTimestamp: (() -> Unit)? = null,
-    shareTimestampLabel: String? = null
+    shareTimestampLabel: String? = null,
+    isPinnedToSpeedDial: Boolean = false,
+    onTogglePinSpeedDial: (() -> Unit)? = null
 ) {
     val linColors = LinTheme.colors
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -212,6 +214,14 @@ fun TrackActionSheet(
                 label = if (isDownloaded) "remove download" else "download for offline",
                 onClick = { onToggleDownload(); onDismiss() }
             )
+            if (onTogglePinSpeedDial != null) {
+                SheetActionItem(
+                    icon = LinIcons.Pin,
+                    label = if (isPinnedToSpeedDial) "unpin from speed dial" else "pin to speed dial",
+                    tint = if (isPinnedToSpeedDial) linColors.defaultAccent else linColors.textPrimary,
+                    onClick = { onTogglePinSpeedDial(); onDismiss() }
+                )
+            }
             SheetActionItem(
                 icon = LinIcons.Tag,
                 label = "manage #tags",

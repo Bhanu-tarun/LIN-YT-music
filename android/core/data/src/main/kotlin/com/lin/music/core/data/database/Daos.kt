@@ -23,6 +23,9 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE playCount > 0 ORDER BY playCount DESC, historyTimestampMs DESC LIMIT :limit")
     fun observeFrequentLocalPlays(limit: Int = 16): Flow<List<TrackEntity>>
 
+    @Query("SELECT * FROM tracks WHERE playCount > 0 ORDER BY playCount DESC, historyTimestampMs DESC LIMIT :limit")
+    fun observePlayedTracksForSpeedDial(limit: Int = 60): Flow<List<TrackEntity>>
+
     @Query("SELECT * FROM tracks WHERE albumId = :albumId ORDER BY updatedAtMs ASC")
     suspend fun getTracksByAlbumId(albumId: String): List<TrackEntity>
 
@@ -233,4 +236,19 @@ interface CacheDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun savePersistedQueue(items: List<PersistedQueueEntity>)
+
+    @Query("SELECT * FROM speed_dial_pins ORDER BY pinnedAtMs ASC")
+    fun observeSpeedDialPins(): Flow<List<SpeedDialPinEntity>>
+
+    @Query("SELECT * FROM speed_dial_pins ORDER BY pinnedAtMs ASC")
+    suspend fun getSpeedDialPinsSnapshot(): List<SpeedDialPinEntity>
+
+    @Query("SELECT * FROM speed_dial_pins WHERE `key` = :key LIMIT 1")
+    suspend fun getSpeedDialPin(key: String): SpeedDialPinEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSpeedDialPin(pin: SpeedDialPinEntity)
+
+    @Query("DELETE FROM speed_dial_pins WHERE `key` = :key")
+    suspend fun deleteSpeedDialPin(key: String)
 }

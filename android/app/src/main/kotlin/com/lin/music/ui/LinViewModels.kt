@@ -32,9 +32,11 @@ import com.lin.music.core.model.PlaylistDetail
 import com.lin.music.core.model.PlaylistSummary
 import com.lin.music.core.model.SearchFilter
 import com.lin.music.core.model.SearchResultPage
+import com.lin.music.core.model.SpeedDialEntry
 import com.lin.music.core.model.Track
 import com.lin.music.core.model.TrackArtworkPalette
 import com.lin.music.core.model.UserPreferences
+import com.lin.music.core.model.speedDialKey
 import com.lin.music.core.playback.cache.TrackPrecacher
 import com.lin.music.core.playback.download.DownloadController
 import com.lin.music.core.playback.download.SmartDownloadManager
@@ -139,6 +141,10 @@ class MainViewModel @Inject constructor(
 
     val distinctTags: StateFlow<List<String>> = repository.observeDistinctTags()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val pinnedSpeedDialKeys: StateFlow<Set<String>> = repository.observeSpeedDialPins()
+        .map { pins -> pins.map { it.key }.toSet() }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
 
     private val _activeTab = MutableStateFlow<MainTab>(MainTab.Home)
     val activeTab: StateFlow<MainTab> = _activeTab.asStateFlow()
@@ -479,10 +485,17 @@ class MainViewModel @Inject constructor(
             val prefs = preferences.value
             if (prefs.smartDownloadsEnabled || prefs.recentlyPlayedDownloadsEnabled) {
                 withContext(Dispatchers.IO) {
-                    runCatching { smartDownloadManager.syncAll() }
+                    runCatching { smartDownloadManager.syncAll(force = false) }
                 }
             }
             _isSyncing.value = false
+        }
+    }
+
+    fun toggleSpeedDialPin(item: HomeItem) {
+        viewModelScope.launch {
+            val pinned = repository.toggleSpeedDialPin(item)
+            showToast(if (pinned) "pinned to speed dial" else "unpinned from speed dial")
         }
     }
 
@@ -839,7 +852,7 @@ class MainViewModel @Inject constructor(
 }
 
 data class HomeUiState(
-    val speedDialTracks: List<Track> = emptyList(),
+    val speedDialItems: List<SpeedDialEntry> = emptyList(),
     val userPlaylists: List<PlaylistSummary> = emptyList(),
     val quickPicks: List<Track> = emptyList(),
     val personalMixSections: List<HomeSection> = emptyList(),
@@ -848,7 +861,7 @@ data class HomeUiState(
     val error: String? = null
 ) {
     val isEmpty: Boolean
-        get() = speedDialTracks.isEmpty() &&
+        get() = speedDialItems.isEmpty() &&
             userPlaylists.isEmpty() &&
             quickPicks.isEmpty() &&
             personalMixSections.isEmpty() &&
@@ -858,7 +871,8 @@ data class HomeUiState(
 private data class HomeFeedInputs(
     val sections: List<HomeSection>,
     val playlists: List<PlaylistSummary>,
-    val localSpeedDial: List<Track>
+    val localSpeedDial: List<Track>,
+    val pinnedEntries: List<SpeedDialEntry>
 )
 
 @HiltViewModel
@@ -875,6 +889,7 @@ class HomeViewModel @Inject constructor(
             rawHomeSections,
             repository.observePlaylists(),
             repository.observeSpeedDialLocalTracks(),
+            repository.observeSpeedDialPins(),
             ::HomeFeedInputs
         ),
         repository.observeHistoryTracks(),
@@ -885,6 +900,7 @@ class HomeViewModel @Inject constructor(
             sections = feed.sections,
             userPlaylists = feed.playlists,
             localSpeedDial = feed.localSpeedDial,
+            pinnedEntries = feed.pinnedEntries,
             historyTracks = history,
             loading = loading,
             error = err
@@ -949,11 +965,12 @@ class HomeViewModel @Inject constructor(
         sections: List<HomeSection>,
         userPlaylists: List<PlaylistSummary>,
         localSpeedDial: List<Track>,
+        pinnedEntries: List<SpeedDialEntry>,
         historyTracks: List<Track>,
         loading: Boolean,
         error: String?
     ): HomeUiState {
-        val ytmSpeedDial = mutableListOf<Track>()
+        val ytmSpeedDial = mutableListOf<HomeItem>()
         val quickPicks = mutableListOf<Track>()
         val personal = mutableListOf<HomeSection>()
         val communityTaste = mutableListOf<HomeSection>()
@@ -977,7 +994,7 @@ class HomeViewModel @Inject constructor(
 
             when {
                 lower.contains("speed dial") -> {
-                    ytmSpeedDial += sec.items.mapNotNull { (it as? HomeItem.SongItem)?.track }
+                    ytmSpeedDial += sec.items
                 }
                 lower.contains("quick pick") || sec.isQuickPicks -> {
                     quickPicks += sec.items.mapNotNull { (it as? HomeItem.SongItem)?.track }
@@ -995,20 +1012,23 @@ class HomeViewModel @Inject constructor(
             }
         }
 
-        val listenAgainTracks = personal
+        val listenAgainItems = personal
             .firstOrNull { it.title.contains("listen again", ignoreCase = true) }
             ?.items
-            ?.mapNotNull { (it as? HomeItem.SongItem)?.track }
             .orEmpty()
 
-        val speedDialTracks = (localSpeedDial + ytmSpeedDial + listenAgainTracks + historyTracks)
-            .distinctBy { it.videoId }
-            .take(16)
+        val speedDialItems = buildSpeedDialEntries(
+            pinnedEntries = pinnedEntries,
+            localPlayedTracks = localSpeedDial,
+            ytmSpeedDialItems = ytmSpeedDial,
+            listenAgainItems = listenAgainItems,
+            historyTracks = historyTracks
+        )
 
         val sortedPlaylists = userPlaylists.sortedByDescending { it.id == "LM" }
 
         return HomeUiState(
-            speedDialTracks = speedDialTracks,
+            speedDialItems = speedDialItems,
             userPlaylists = sortedPlaylists,
             quickPicks = quickPicks.distinctBy { it.videoId }.take(16),
             personalMixSections = personal,
@@ -1016,6 +1036,44 @@ class HomeViewModel @Inject constructor(
             isLoading = loading,
             error = error
         )
+    }
+
+    companion object {
+        const val MAX_SPEED_DIAL_ITEMS = 27
+
+        fun buildSpeedDialEntries(
+            pinnedEntries: List<SpeedDialEntry>,
+            localPlayedTracks: List<Track>,
+            ytmSpeedDialItems: List<HomeItem>,
+            listenAgainItems: List<HomeItem>,
+            historyTracks: List<Track>,
+            maxItems: Int = MAX_SPEED_DIAL_ITEMS
+        ): List<SpeedDialEntry> {
+            val result = mutableListOf<SpeedDialEntry>()
+            val seen = mutableSetOf<String>()
+
+            fun append(item: HomeItem, isPinned: Boolean) {
+                if (result.size >= maxItems) return
+                val key = item.speedDialKey()
+                if (seen.add(key)) {
+                    result += SpeedDialEntry(key = key, item = item, isPinned = isPinned)
+                }
+            }
+
+            pinnedEntries.forEach { append(it.item, isPinned = true) }
+
+            val localItems = localPlayedTracks.map { HomeItem.SongItem(it) }
+            val maxPairCount = maxOf(ytmSpeedDialItems.size, localItems.size)
+            for (i in 0 until maxPairCount) {
+                ytmSpeedDialItems.getOrNull(i)?.let { append(it, isPinned = false) }
+                localItems.getOrNull(i)?.let { append(it, isPinned = false) }
+            }
+
+            listenAgainItems.forEach { append(it, isPinned = false) }
+            historyTracks.forEach { append(HomeItem.SongItem(it), isPinned = false) }
+
+            return result
+        }
     }
 }
 
@@ -1365,12 +1423,14 @@ class SettingsViewModel @Inject constructor(
     fun setAudioQuality(q: AudioQuality) = update { it.copy(audioQuality = q) }
     fun setDownloadQuality(q: AudioQuality) = update { it.copy(downloadQuality = q) }
     fun setDownloadWifiOnly(wifiOnly: Boolean) = update { it.copy(downloadWifiOnly = wifiOnly) }
-    fun setSmartDownloadsEnabled(enabled: Boolean) = update(syncSmart = true) { it.copy(smartDownloadsEnabled = enabled) }
-    fun setSmartDownloadsLimit(limit: Int) = update(syncSmart = true) { it.copy(smartDownloadsLimit = limit) }
+    fun setSmartDownloadsEnabled(enabled: Boolean) =
+        update(syncKind = DownloadSyncKind.SMART) { it.copy(smartDownloadsEnabled = enabled) }
+    fun setSmartDownloadsLimit(limit: Int) =
+        update(syncKind = DownloadSyncKind.SMART) { it.copy(smartDownloadsLimit = limit) }
     fun setRecentlyPlayedDownloadsEnabled(enabled: Boolean) =
-        update(syncSmart = true) { it.copy(recentlyPlayedDownloadsEnabled = enabled) }
+        update(syncKind = DownloadSyncKind.RECENT) { it.copy(recentlyPlayedDownloadsEnabled = enabled) }
     fun setRecentlyPlayedDownloadsLimit(limit: Int) =
-        update(syncSmart = true) { it.copy(recentlyPlayedDownloadsLimit = limit) }
+        update(syncKind = DownloadSyncKind.RECENT) { it.copy(recentlyPlayedDownloadsLimit = limit) }
     fun setCapitalizeLabels(capitalize: Boolean) = update { it.copy(capitalizeLabels = capitalize) }
     fun setNormalizeVolume(v: Boolean) = update { it.copy(normalizeVolume = v) }
     fun setSkipSilence(v: Boolean) = update { it.copy(skipSilence = v) }
@@ -1383,7 +1443,7 @@ class SettingsViewModel @Inject constructor(
 
     fun syncSmartDownloadsNow() {
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { smartDownloadManager.syncAll() }
+            runCatching { smartDownloadManager.syncSmartDownloads(force = true) }
         }
     }
 
@@ -1398,13 +1458,22 @@ class SettingsViewModel @Inject constructor(
     suspend fun exportBackup(): String = repository.exportBackupJson()
     suspend fun importBackup(json: String): Result<Unit> = repository.importBackupJson(json)
 
-    private fun update(syncSmart: Boolean = false, block: (UserPreferences) -> UserPreferences) {
+    private enum class DownloadSyncKind { NONE, SMART, RECENT }
+
+    private fun update(
+        syncKind: DownloadSyncKind = DownloadSyncKind.NONE,
+        block: (UserPreferences) -> UserPreferences
+    ) {
         viewModelScope.launch {
             preferencesStore.update(block)
-            if (syncSmart) {
-                withContext(Dispatchers.IO) {
-                    runCatching { smartDownloadManager.syncAll() }
+            when (syncKind) {
+                DownloadSyncKind.SMART -> withContext(Dispatchers.IO) {
+                    runCatching { smartDownloadManager.syncSmartDownloads(force = true) }
                 }
+                DownloadSyncKind.RECENT -> withContext(Dispatchers.IO) {
+                    runCatching { smartDownloadManager.syncRecentlyPlayedDownloads(force = true) }
+                }
+                DownloadSyncKind.NONE -> Unit
             }
         }
     }

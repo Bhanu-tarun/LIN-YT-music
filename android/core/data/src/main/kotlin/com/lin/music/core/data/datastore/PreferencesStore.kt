@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.lin.music.core.model.AmbientMode
@@ -49,6 +50,8 @@ class PreferencesStore @Inject constructor(
         val PLAYBACK_PITCH = floatPreferencesKey("playback_pitch")
         val SHOW_THUMBNAILS = booleanPreferencesKey("show_thumbnails")
         val SPEED_MIGRATED_V2 = booleanPreferencesKey("speed_migrated_v2")
+        val LAST_SMART_DOWNLOAD_SYNC_MS = longPreferencesKey("last_smart_download_sync_ms")
+        val LAST_RECENT_DOWNLOAD_SYNC_MS = longPreferencesKey("last_recent_download_sync_ms")
     }
 
     private fun fromPreferences(prefs: Preferences): UserPreferences = UserPreferences(
@@ -99,6 +102,24 @@ class PreferencesStore @Inject constructor(
         context.userPrefsDataStore.edit { prefs ->
             val current = prefs[Keys.IS_DARK_THEME] ?: true
             prefs[Keys.IS_DARK_THEME] = !current
+        }
+    }
+
+    suspend fun getLastSmartDownloadSyncMs(): Long =
+        context.userPrefsDataStore.data.map { it[Keys.LAST_SMART_DOWNLOAD_SYNC_MS] ?: 0L }.first()
+
+    suspend fun setLastSmartDownloadSyncMs(epochMs: Long) {
+        context.userPrefsDataStore.edit { prefs ->
+            prefs[Keys.LAST_SMART_DOWNLOAD_SYNC_MS] = epochMs
+        }
+    }
+
+    suspend fun getLastRecentDownloadSyncMs(): Long =
+        context.userPrefsDataStore.data.map { it[Keys.LAST_RECENT_DOWNLOAD_SYNC_MS] ?: 0L }.first()
+
+    suspend fun setLastRecentDownloadSyncMs(epochMs: Long) {
+        context.userPrefsDataStore.edit { prefs ->
+            prefs[Keys.LAST_RECENT_DOWNLOAD_SYNC_MS] = epochMs
         }
     }
 

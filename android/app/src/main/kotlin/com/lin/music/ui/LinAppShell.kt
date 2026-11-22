@@ -71,7 +71,10 @@ import com.lin.music.core.designsystem.theme.LinSharpShape
 import com.lin.music.core.designsystem.theme.LinTextStyles
 import com.lin.music.core.designsystem.theme.LinTheme
 import com.lin.music.core.designsystem.theme.linLabel
+import com.lin.music.core.model.HomeItem
 import com.lin.music.core.model.PlaylistDetail
+import com.lin.music.core.model.speedDialKey
+import com.lin.music.core.model.toSummary
 import com.lin.music.feature.auth.YtmLoginScreen
 import com.lin.music.feature.detail.AlbumDetailScreen
 import com.lin.music.feature.detail.ArtistDetailScreen
@@ -106,6 +109,7 @@ fun LinAppShell(
     val playlists by mainViewModel.playlists.collectAsStateWithLifecycle()
     val downloadMap by mainViewModel.downloadMap.collectAsStateWithLifecycle()
     val distinctTags by mainViewModel.distinctTags.collectAsStateWithLifecycle()
+    val pinnedSpeedDialKeys by mainViewModel.pinnedSpeedDialKeys.collectAsStateWithLifecycle()
 
     val queueSnapshot by mainViewModel.playerController.queueSnapshot.collectAsStateWithLifecycle()
     val isPlaying by mainViewModel.playerController.isPlaying.collectAsStateWithLifecycle()
@@ -292,6 +296,7 @@ fun LinAppShell(
                                     val albumData by detailVm.album.collectAsStateWithLifecycle()
                                     val loading by detailVm.isLoading.collectAsStateWithLifecycle()
                                     val err by detailVm.error.collectAsStateWithLifecycle()
+                                    val albumPinItem = albumData?.let { HomeItem.AlbumItem(it.toSummary()) }
                                     AlbumDetailScreen(
                                         album = albumData,
                                         isLoading = loading,
@@ -314,7 +319,9 @@ fun LinAppShell(
                                         onSwipeRightPlayNext = mainViewModel::playNext,
                                         onSwipeLeftAddToQueue = mainViewModel::addToQueue,
                                         onTrackMore = { t -> mainViewModel.openTrackActions(t) },
-                                        onPreviewTrack = mainViewModel::prefetchTrack
+                                        onPreviewTrack = mainViewModel::prefetchTrack,
+                                        isPinnedToSpeedDial = albumPinItem?.let { it.speedDialKey() in pinnedSpeedDialKeys } == true,
+                                        onTogglePinSpeedDial = albumPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } }
                                     )
                                 }
 
@@ -325,6 +332,7 @@ fun LinAppShell(
                                     val loading by detailVm.isLoading.collectAsStateWithLifecycle()
                                     val err by detailVm.error.collectAsStateWithLifecycle()
                                     val libraryTracks by libraryViewModel.libraryTracks.collectAsStateWithLifecycle()
+                                    val plPinItem = plData?.let { HomeItem.PlaylistItem(it.toSummary()) }
                                     PlaylistDetailScreen(
                                         playlist = plData,
                                         isLoading = loading,
@@ -373,7 +381,9 @@ fun LinAppShell(
                                         onTrackMore = { t, ctx -> mainViewModel.openTrackActions(t, ctx) },
                                         onTrackRemovedLocal = detailVm::removePlaylistTrackLocal,
                                         onTrackRestoredLocal = detailVm::restorePlaylistTrackLocal,
-                                        onPreviewTrack = mainViewModel::prefetchTrack
+                                        onPreviewTrack = mainViewModel::prefetchTrack,
+                                        isPinnedToSpeedDial = plPinItem?.let { it.speedDialKey() in pinnedSpeedDialKeys } == true,
+                                        onTogglePinSpeedDial = plPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } }
                                     )
                                 }
 
@@ -435,6 +445,7 @@ fun LinAppShell(
                                     val artistData by detailVm.artist.collectAsStateWithLifecycle()
                                     val loading by detailVm.isLoading.collectAsStateWithLifecycle()
                                     val err by detailVm.error.collectAsStateWithLifecycle()
+                                    val artistPinItem = artistData?.let { HomeItem.ArtistItem(it.toSummary()) }
                                     ArtistDetailScreen(
                                         artist = artistData,
                                         isLoading = loading,
@@ -451,7 +462,9 @@ fun LinAppShell(
                                         onArtistClick = { id -> mainViewModel.openDetail(DetailRoute.Artist(id)) },
                                         onSwipeRightPlayNext = mainViewModel::playNext,
                                         onSwipeLeftAddToQueue = mainViewModel::addToQueue,
-                                        onTrackMore = { t -> mainViewModel.openTrackActions(t) }
+                                        onTrackMore = { t -> mainViewModel.openTrackActions(t) },
+                                        isPinnedToSpeedDial = artistPinItem?.let { it.speedDialKey() in pinnedSpeedDialKeys } == true,
+                                        onTogglePinSpeedDial = artistPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } }
                                     )
                                 }
 
@@ -510,6 +523,8 @@ fun LinAppShell(
                                         onLoadMore = homeViewModel::loadMore,
                                         onSeeAllPlaylists = { mainViewModel.selectTab(MainTab.Playlists) },
                                         onPlayTracks = mainViewModel.playerController::playContext,
+                                        onStartMixForTrack = mainViewModel::startMixForTrack,
+                                        onTogglePinSpeedDial = mainViewModel::toggleSpeedDialPin,
                                         onTrackMore = { t -> mainViewModel.openTrackActions(t) },
                                         onAlbumClick = { id -> mainViewModel.openDetail(DetailRoute.Album(id)) },
                                         onPlaylistClick = { id -> mainViewModel.openDetail(DetailRoute.Playlist(id)) },
@@ -794,7 +809,9 @@ fun LinAppShell(
                         } else null,
                         shareTimestampLabel = if (isPlayerExpanded && track.videoId == currentVideoId && snapPositionMs > 1000L) {
                             formatDurationMs(snapPositionMs)
-                        } else null
+                        } else null,
+                        isPinnedToSpeedDial = HomeItem.SongItem(track).speedDialKey() in pinnedSpeedDialKeys,
+                        onTogglePinSpeedDial = { mainViewModel.toggleSpeedDialPin(HomeItem.SongItem(track)) }
                     )
                 }
 

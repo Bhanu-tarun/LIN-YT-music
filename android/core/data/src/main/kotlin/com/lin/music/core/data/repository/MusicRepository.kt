@@ -10,6 +10,7 @@ import com.lin.music.core.data.database.PlaylistDao
 import com.lin.music.core.data.database.PlaylistEntity
 import com.lin.music.core.data.database.PlaylistTrackCrossRef
 import com.lin.music.core.data.database.SearchHistoryEntity
+import com.lin.music.core.data.database.SpeedDialPinEntity
 import com.lin.music.core.data.database.TagDao
 import com.lin.music.core.data.database.TrackDao
 import com.lin.music.core.data.database.toEntity
@@ -23,6 +24,7 @@ import com.lin.music.core.model.AlbumRef
 import com.lin.music.core.model.AlbumSummary
 import com.lin.music.core.model.ArtistDetail
 import com.lin.music.core.model.ArtistSummary
+import com.lin.music.core.model.HomeItem
 import com.lin.music.core.model.HomePage
 import com.lin.music.core.model.ItemTagRecord
 import com.lin.music.core.model.LinBackupPayload
@@ -32,7 +34,9 @@ import com.lin.music.core.model.PlaylistDetail
 import com.lin.music.core.model.PlaylistSummary
 import com.lin.music.core.model.SearchFilter
 import com.lin.music.core.model.SearchResultPage
+import com.lin.music.core.model.SpeedDialEntry
 import com.lin.music.core.model.Track
+import com.lin.music.core.model.speedDialKey
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -105,15 +109,46 @@ class MusicRepository @Inject constructor(
             tracks.map { it.toModel(tags = tagMap[it.videoId].orEmpty()) }
         }
 
+    fun observeSpeedDialPins(): Flow<List<SpeedDialEntry>> =
+        cacheDao.observeSpeedDialPins().map { pins -> pins.mapNotNull { it.toEntry() } }
+
+    suspend fun toggleSpeedDialPin(item: HomeItem): Boolean {
+        val key = item.speedDialKey()
+        val existing = cacheDao.getSpeedDialPin(key)
+        return if (existing != null) {
+            cacheDao.deleteSpeedDialPin(key)
+            false
+        } else {
+            cacheDao.upsertSpeedDialPin(
+                SpeedDialPinEntity(
+                    key = key,
+                    itemJson = json.encodeToString(item)
+                )
+            )
+            true
+        }
+    }
+
     fun observeSpeedDialLocalTracks(): Flow<List<Track>> =
         combine(
-            trackDao.observeRecentLocalPlays(16),
-            trackDao.observeFrequentLocalPlays(16),
+            trackDao.observePlayedTracksForSpeedDial(60),
             tagDao.observeAllTags()
-        ) { recent, frequent, tags ->
+        ) { played, tags ->
+            val nowMs = System.currentTimeMillis()
             val tagMap = tags.filter { it.itemType == "track" }.groupBy({ it.itemId }, { it.tag })
-            val merged = (recent.take(4) + frequent + recent).distinctBy { it.videoId }.take(16)
-            merged.map { it.toModel(tags = tagMap[it.videoId].orEmpty()) }
+            val qualified = played.filter { entity ->
+                entity.playCount >= 2 || (nowMs - entity.historyTimestampMs) <= 48L * 3_600_000L
+            }.ifEmpty { played }
+            qualified
+                .sortedByDescending { entity ->
+                    val daysSince = ((nowMs - entity.historyTimestampMs).coerceAtLeast(0L)) / 86_400_000.0
+                    val freqDecay = entity.playCount * 10.0 / (1.0 + daysSince / 14.0)
+                    val likeBoost = if (entity.isLiked) 6.0 else 0.0
+                    val recentBoost = if (daysSince < 2.0) 8.0 / (1.0 + daysSince) else 0.0
+                    freqDecay + likeBoost + recentBoost
+                }
+                .take(27)
+                .map { it.toModel(tags = tagMap[it.videoId].orEmpty()) }
         }
 
     fun observePlaylists(): Flow<List<PlaylistSummary>> =

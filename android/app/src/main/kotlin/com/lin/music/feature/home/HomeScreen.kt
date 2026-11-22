@@ -22,6 +22,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
@@ -50,7 +53,10 @@ import com.lin.music.core.designsystem.theme.linLabel
 import com.lin.music.core.model.HomeItem
 import com.lin.music.core.model.HomeSection
 import com.lin.music.core.model.PlaylistSummary
+import com.lin.music.core.model.SpeedDialEntry
 import com.lin.music.core.model.Track
+import com.lin.music.core.model.displayTitle
+import com.lin.music.core.model.thumbnailUrl
 import com.lin.music.ui.HomeUiState
 
 @Composable
@@ -63,6 +69,8 @@ fun HomeScreen(
     onLoadMore: () -> Unit,
     onSeeAllPlaylists: () -> Unit,
     onPlayTracks: (List<Track>, Int, String) -> Unit,
+    onStartMixForTrack: (Track) -> Unit,
+    onTogglePinSpeedDial: (HomeItem) -> Unit,
     onTrackMore: (Track) -> Unit,
     onAlbumClick: (String) -> Unit,
     onPlaylistClick: (String) -> Unit,
@@ -91,28 +99,21 @@ fun HomeScreen(
             }
         }
 
-        // 1. Speed Dial (max 4x4 grid, live-updated from playback & frequency)
-        if (uiState.speedDialTracks.isNotEmpty()) {
+        // 1. Speed Dial (YTM-style 3x3 swipeable pages, mixed items, pinning & tap-to-mix)
+        if (uiState.speedDialItems.isNotEmpty()) {
             item(key = "home_speed_dial") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(linLabel("speed dial"), style = LinTextStyles.sectionHeading, color = linColors.textPrimary)
-                        LinOutlinedButton(
-                            text = "play all",
-                            onClick = { onPlayTracks(uiState.speedDialTracks, 0, "speed dial") }
-                        )
-                    }
-                    CompactTrackGrid4x4(
-                        tracks = uiState.speedDialTracks,
+                    Text(linLabel("speed dial"), style = LinTextStyles.sectionHeading, color = linColors.textPrimary)
+                    SpeedDialPager3x3(
+                        items = uiState.speedDialItems,
                         currentVideoId = currentVideoId,
                         accentColor = accentColor,
-                        downloadMap = downloadMap,
-                        onPlayAtIndex = { idx -> onPlayTracks(uiState.speedDialTracks, idx, "speed dial") },
-                        onTrackMore = onTrackMore
+                        onStartMixForTrack = onStartMixForTrack,
+                        onTrackMore = onTrackMore,
+                        onAlbumClick = onAlbumClick,
+                        onPlaylistClick = onPlaylistClick,
+                        onArtistClick = onArtistClick,
+                        onTogglePin = onTogglePinSpeedDial
                     )
                 }
             }
@@ -212,6 +213,152 @@ fun HomeScreen(
                 ) {
                     LinOutlinedButton(text = "refresh", onClick = onRefresh)
                     LinOutlinedButton(text = "load more", onClick = onLoadMore)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SpeedDialPager3x3(
+    items: List<SpeedDialEntry>,
+    currentVideoId: String?,
+    accentColor: Color,
+    onStartMixForTrack: (Track) -> Unit,
+    onTrackMore: (Track) -> Unit,
+    onAlbumClick: (String) -> Unit,
+    onPlaylistClick: (String) -> Unit,
+    onArtistClick: (String) -> Unit,
+    onTogglePin: (HomeItem) -> Unit
+) {
+    val linColors = LinTheme.colors
+    val haptic = LocalHapticFeedback.current
+    val pages = remember(items) { items.take(27).chunked(9) }
+    val pagerState = rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
+    val scrimBrush = remember {
+        Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.80f)))
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        HorizontalPager(
+            state = pagerState,
+            beyondViewportPageCount = 0,
+            pageSpacing = 12.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) { pageIdx ->
+            val pageEntries = pages.getOrNull(pageIdx).orEmpty()
+            val rows = pageEntries.chunked(3)
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rows.forEach { rowEntries ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (col in 0 until 3) {
+                            val entry = rowEntries.getOrNull(col)
+                            if (entry == null) {
+                                Spacer(Modifier.weight(1f))
+                            } else {
+                                val item = entry.item
+                                val isArtist = item is HomeItem.ArtistItem
+                                val isPlaying = (item as? HomeItem.SongItem)?.track?.videoId == currentVideoId &&
+                                    currentVideoId != null
+                                val shape = if (isArtist) CircleShape else LinSharpShape
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .aspectRatio(1f)
+                                        .clip(shape)
+                                        .background(linColors.glassBorder)
+                                        .border(1.dp, if (isPlaying) accentColor else linColors.glassBorder, shape)
+                                        .combinedClickable(
+                                            onClick = {
+                                                when (item) {
+                                                    is HomeItem.SongItem -> onStartMixForTrack(item.track)
+                                                    is HomeItem.AlbumItem -> onAlbumClick(item.album.browseId)
+                                                    is HomeItem.PlaylistItem -> onPlaylistClick(item.playlist.browseId)
+                                                    is HomeItem.ArtistItem -> onArtistClick(item.artist.browseId)
+                                                }
+                                            },
+                                            onLongClick = {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                when (item) {
+                                                    is HomeItem.SongItem -> onTrackMore(item.track)
+                                                    else -> onTogglePin(item)
+                                                }
+                                            }
+                                        )
+                                ) {
+                                    val thumb = item.thumbnailUrl()
+                                    if (!thumb.isNullOrBlank()) {
+                                        AsyncImage(
+                                            model = thumb,
+                                            contentDescription = item.displayTitle(),
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomCenter)
+                                            .fillMaxWidth()
+                                            .background(scrimBrush)
+                                            .padding(horizontal = 6.dp, vertical = 5.dp)
+                                    ) {
+                                        Text(
+                                            text = item.displayTitle(),
+                                            style = LinTextStyles.subtitle.copy(
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium
+                                            ),
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (entry.isPinned) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(4.dp)
+                                                .background(Color.Black.copy(alpha = 0.65f))
+                                                .padding(3.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = LinIcons.Pin,
+                                                contentDescription = "Pinned",
+                                                tint = accentColor,
+                                                modifier = Modifier.size(10.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (pages.size > 1) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                pages.indices.forEach { idx ->
+                    val selected = pagerState.currentPage == idx
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 3.dp)
+                            .width(if (selected) 18.dp else 6.dp)
+                            .height(3.dp)
+                            .background(if (selected) accentColor else linColors.glassBorder)
+                    )
                 }
             }
         }

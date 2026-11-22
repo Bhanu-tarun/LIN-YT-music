@@ -105,6 +105,63 @@ sealed interface HomeItem {
     data class ArtistItem(val artist: ArtistSummary) : HomeItem
 }
 
+fun HomeItem.speedDialKey(): String = when (this) {
+    is HomeItem.SongItem -> "song:${track.videoId}"
+    is HomeItem.AlbumItem -> "album:${album.browseId}"
+    is HomeItem.PlaylistItem -> "playlist:${playlist.browseId.removePrefix("VL")}"
+    is HomeItem.ArtistItem -> "artist:${artist.browseId}"
+}
+
+fun HomeItem.displayTitle(): String = when (this) {
+    is HomeItem.SongItem -> track.title
+    is HomeItem.AlbumItem -> album.title
+    is HomeItem.PlaylistItem -> playlist.title
+    is HomeItem.ArtistItem -> artist.name
+}
+
+fun HomeItem.thumbnailUrl(): String? = when (this) {
+    is HomeItem.SongItem -> track.thumbnailUrl
+    is HomeItem.AlbumItem -> album.thumbnailUrl
+    is HomeItem.PlaylistItem -> playlist.thumbnailUrl
+    is HomeItem.ArtistItem -> artist.thumbnailUrl
+}
+
+@Serializable
+data class SpeedDialEntry(
+    val key: String,
+    val item: HomeItem,
+    val isPinned: Boolean = false
+)
+
+fun AlbumDetail.toSummary(): AlbumSummary = AlbumSummary(
+    browseId = browseId,
+    playlistId = playlistId,
+    title = title,
+    artists = artists,
+    year = year,
+    isEpOrSingle = isEpOrSingle,
+    thumbnailUrl = thumbnailUrl,
+    tags = tags
+)
+
+fun PlaylistDetail.toSummary(): PlaylistSummary = PlaylistSummary(
+    id = id,
+    browseId = browseId,
+    title = title,
+    subtitle = author,
+    thumbnailUrl = thumbnailUrl,
+    trackCount = tracks.size,
+    isEditable = isEditable,
+    tags = tags
+)
+
+fun ArtistDetail.toSummary(): ArtistSummary = ArtistSummary(
+    browseId = browseId,
+    name = name,
+    subscriberCount = subscriberCount,
+    thumbnailUrl = thumbnailUrl
+)
+
 @Serializable
 data class HomeSection(
     val title: String,

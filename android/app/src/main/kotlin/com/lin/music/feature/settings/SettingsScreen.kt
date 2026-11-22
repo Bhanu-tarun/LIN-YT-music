@@ -175,7 +175,7 @@ fun SettingsScreen(
 
                 SettingToggleRow(linLabel("smart downloads"), preferences.smartDownloadsEnabled, onSetSmartDownloadsEnabled)
                 Text(
-                    text = linLabel("auto-download frequent plays & favorites up to cap"),
+                    text = linLabel("daily wi-fi refresh · sticky favorites & frequent plays up to cap"),
                     style = LinTextStyles.subtitle,
                     color = linColors.textSecondary
                 )

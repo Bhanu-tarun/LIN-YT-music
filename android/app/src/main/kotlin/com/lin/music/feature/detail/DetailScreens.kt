@@ -93,6 +93,8 @@ fun AlbumDetailScreen(
     onSwipeLeftAddToQueue: (Track) -> Unit,
     onTrackMore: (Track) -> Unit,
     onPreviewTrack: (Track) -> Unit = {},
+    isPinnedToSpeedDial: Boolean = false,
+    onTogglePinSpeedDial: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
@@ -232,6 +234,12 @@ fun AlbumDetailScreen(
                             LinOutlinedButton("start mix", onClick = { onStartMix(data.tracks.first()) })
                             LinOutlinedButton("download", onClick = { onDownloadAll(data.tracks) })
                         }
+                        if (onTogglePinSpeedDial != null) {
+                            LinOutlinedButton(
+                                text = if (isPinnedToSpeedDial) "pinned ✓" else "pin",
+                                onClick = onTogglePinSpeedDial
+                            )
+                        }
                         LinOutlinedButton(
                             text = "share",
                             onClick = {
@@ -321,6 +329,8 @@ fun PlaylistDetailScreen(
     onTrackRemovedLocal: (Track) -> Unit,
     onTrackRestoredLocal: (Track) -> Unit,
     onPreviewTrack: (Track) -> Unit = {},
+    isPinnedToSpeedDial: Boolean = false,
+    onTogglePinSpeedDial: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
@@ -504,6 +514,12 @@ fun PlaylistDetailScreen(
                                     LinOutlinedButton("copy to edit", onClick = onCloneToEditable)
                                 }
                             }
+                            if (onTogglePinSpeedDial != null) {
+                                LinOutlinedButton(
+                                    text = if (isPinnedToSpeedDial) "pinned ✓" else "pin",
+                                    onClick = onTogglePinSpeedDial
+                                )
+                            }
                             LinOutlinedButton(
                                 text = "share",
                                 onClick = { ShareHelper.shareText(context, "${data.title}\n${ShareHelper.playlistUrl(data.id)}", data.title) }
@@ -657,6 +673,8 @@ fun ArtistDetailScreen(
     onSwipeRightPlayNext: (Track) -> Unit,
     onSwipeLeftAddToQueue: (Track) -> Unit,
     onTrackMore: (Track) -> Unit,
+    isPinnedToSpeedDial: Boolean = false,
+    onTogglePinSpeedDial: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
@@ -729,6 +747,12 @@ fun ArtistDetailScreen(
                     )
                     (data.radioPlaylistId ?: data.topSongs.firstOrNull()?.let { "RDAMVM${it.videoId}" })?.let { mixId ->
                         LinOutlinedButton("start mix", onClick = { onStartMix(mixId, data.name) })
+                    }
+                    if (onTogglePinSpeedDial != null) {
+                        LinOutlinedButton(
+                            text = if (isPinnedToSpeedDial) "pinned ✓" else "pin",
+                            onClick = onTogglePinSpeedDial
+                        )
                     }
                     LinOutlinedButton("share", onClick = {
                         ShareHelper.shareText(context, "${data.name}\n${ShareHelper.artistUrl(data.browseId)}", data.name)

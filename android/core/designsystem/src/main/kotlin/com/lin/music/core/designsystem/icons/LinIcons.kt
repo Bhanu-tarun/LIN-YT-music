@@ -296,6 +296,15 @@ object LinIcons {
         }
     }
 
+    val Pin: ImageVector by lazy {
+        buildIcon("Pin") {
+            moveTo(12f, 17f); lineTo(12f, 22f)
+            moveTo(9f, 4f); lineTo(15f, 4f)
+            lineTo(14f, 11f); lineTo(17f, 14f); lineTo(17f, 17f)
+            lineTo(7f, 17f); lineTo(7f, 14f); lineTo(10f, 11f); close()
+        }
+    }
+
     val Settings: ImageVector by lazy {
         buildIcon("Settings") {
             moveTo(4f, 6f); lineTo(20f, 6f)

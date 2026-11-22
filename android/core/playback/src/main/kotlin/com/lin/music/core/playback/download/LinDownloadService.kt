@@ -61,6 +61,11 @@ class LinDownloadService : DownloadService(
                 }
                 scope.launch {
                     val existing = cacheDao.getDownload(download.request.id)
+                    val keptTimestamp = if (existing != null && existing.state == 2 && mappedState == 2) {
+                        existing.updatedAtMs
+                    } else {
+                        System.currentTimeMillis()
+                    }
                     cacheDao.upsertDownload(
                         DownloadEntity(
                             videoId = download.request.id,
@@ -68,7 +73,8 @@ class LinDownloadService : DownloadService(
                             progressPercent = download.percentDownloaded.coerceAtLeast(0f),
                             bytesDownloaded = download.bytesDownloaded,
                             totalBytes = download.contentLength.coerceAtLeast(0L),
-                            sourceFlags = existing?.sourceFlags ?: DownloadEntity.SOURCE_MANUAL
+                            sourceFlags = existing?.sourceFlags ?: DownloadEntity.SOURCE_MANUAL,
+                            updatedAtMs = keptTimestamp
                         )
                     )
                 }
@@ -148,10 +154,18 @@ class DownloadController @Inject constructor(
             val existingDl = cacheDao.getDownload(track.videoId)
             val mergedFlags = (existingDl?.sourceFlags ?: 0) or sourceFlag
             if (existingDl != null && existingDl.state == 2) {
+                val nextUpdatedAt = if (
+                    sourceFlag == DownloadEntity.SOURCE_SMART &&
+                    (existingDl.sourceFlags and DownloadEntity.SOURCE_SMART) == 0
+                ) {
+                    System.currentTimeMillis()
+                } else {
+                    existingDl.updatedAtMs
+                }
                 cacheDao.upsertDownload(
                     existingDl.copy(
                         sourceFlags = mergedFlags,
-                        updatedAtMs = System.currentTimeMillis()
+                        updatedAtMs = nextUpdatedAt
                     )
                 )
                 return@launch

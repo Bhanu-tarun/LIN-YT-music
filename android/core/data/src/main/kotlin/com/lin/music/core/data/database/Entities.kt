@@ -7,8 +7,10 @@ import com.lin.music.core.model.AlbumRef
 import com.lin.music.core.model.AlbumSummary
 import com.lin.music.core.model.ArtistRef
 import com.lin.music.core.model.ArtistSummary
+import com.lin.music.core.model.HomeItem
 import com.lin.music.core.model.LyricsResult
 import com.lin.music.core.model.PlaylistSummary
+import com.lin.music.core.model.SpeedDialEntry
 import com.lin.music.core.model.StreamInfo
 import com.lin.music.core.model.Track
 import kotlinx.serialization.encodeToString
@@ -278,5 +280,20 @@ data class LyricsCacheEntity(
 ) {
     fun toModel(): LyricsResult? = runCatching {
         entityJson.decodeFromString<LyricsResult>(resultJson)
+    }.getOrNull()
+}
+
+@Entity(tableName = "speed_dial_pins")
+data class SpeedDialPinEntity(
+    @PrimaryKey val key: String,
+    val itemJson: String,
+    val pinnedAtMs: Long = System.currentTimeMillis()
+) {
+    fun toEntry(): SpeedDialEntry? = runCatching {
+        SpeedDialEntry(
+            key = key,
+            item = entityJson.decodeFromString<HomeItem>(itemJson),
+            isPinned = true
+        )
     }.getOrNull()
 }
