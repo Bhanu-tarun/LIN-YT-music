@@ -20,3 +20,6 @@ Thumbs.db
 *.hprof
 captures/
 .cxx/
+
+# Local reference web UI (not tracked in git)
+frontend_css/
