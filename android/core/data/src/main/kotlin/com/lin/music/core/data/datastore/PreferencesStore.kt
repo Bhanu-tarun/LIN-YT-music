@@ -10,9 +10,11 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.lin.music.core.innertube.RegionProvider
 import com.lin.music.core.model.AmbientMode
 import com.lin.music.core.model.AmbientReactivity
 import com.lin.music.core.model.AudioQuality
+import com.lin.music.core.model.ContentRegions
 import com.lin.music.core.model.UserPreferences
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -26,7 +28,10 @@ private val Context.userPrefsDataStore: DataStore<Preferences> by preferencesDat
 @Singleton
 class PreferencesStore @Inject constructor(
     @ApplicationContext private val context: Context
-) {
+) : RegionProvider {
+    @Volatile
+    private var cachedRegionCode: String? = null
+
     private object Keys {
         val IS_DARK_THEME = booleanPreferencesKey("is_dark_theme")
         val AMBIENT_MODE = stringPreferencesKey("ambient_mode")
@@ -52,39 +57,47 @@ class PreferencesStore @Inject constructor(
         val SPEED_MIGRATED_V2 = booleanPreferencesKey("speed_migrated_v2")
         val LAST_SMART_DOWNLOAD_SYNC_MS = longPreferencesKey("last_smart_download_sync_ms")
         val LAST_RECENT_DOWNLOAD_SYNC_MS = longPreferencesKey("last_recent_download_sync_ms")
+        val CONTENT_REGION = stringPreferencesKey("content_region")
     }
 
-    private fun fromPreferences(prefs: Preferences): UserPreferences = UserPreferences(
-        isDarkTheme = prefs[Keys.IS_DARK_THEME] ?: true,
-        ambientMode = prefs[Keys.AMBIENT_MODE]?.let { runCatching { AmbientMode.valueOf(it) }.getOrNull() }
-            ?: AmbientMode.AUDIO_REACTIVE,
-        ambientReactivity = prefs[Keys.AMBIENT_REACTIVITY]?.let { runCatching { AmbientReactivity.valueOf(it) }.getOrNull() }
-            ?: AmbientReactivity.EXPRESSIVE,
-        audioQuality = prefs[Keys.AUDIO_QUALITY]?.let { runCatching { AudioQuality.valueOf(it) }.getOrNull() }
-            ?: AudioQuality.HIGH,
-        downloadQuality = prefs[Keys.DOWNLOAD_QUALITY]?.let { runCatching { AudioQuality.valueOf(it) }.getOrNull() }
-            ?: AudioQuality.HIGH,
-        downloadWifiOnly = prefs[Keys.DOWNLOAD_WIFI_ONLY] ?: false,
-        smartDownloadsEnabled = prefs[Keys.SMART_DOWNLOADS_ENABLED] ?: false,
-        smartDownloadsLimit = prefs[Keys.SMART_DOWNLOADS_LIMIT] ?: 50,
-        recentlyPlayedDownloadsEnabled = prefs[Keys.RECENTLY_PLAYED_DOWNLOADS_ENABLED] ?: false,
-        recentlyPlayedDownloadsLimit = prefs[Keys.RECENTLY_PLAYED_DOWNLOADS_LIMIT] ?: 20,
-        capitalizeLabels = prefs[Keys.CAPITALIZE_LABELS] ?: false,
-        normalizeVolume = prefs[Keys.NORMALIZE_VOLUME] ?: true,
-        skipSilence = prefs[Keys.SKIP_SILENCE] ?: false,
-        autoMix = prefs[Keys.AUTO_MIX] ?: true,
-        sponsorBlockEnabled = prefs[Keys.SPONSOR_BLOCK] ?: false,
-        reportPlaybackHistory = prefs[Keys.REPORT_HISTORY] ?: true,
-        cacheLimitMb = prefs[Keys.CACHE_LIMIT_MB] ?: 1024,
-        includeMusicVideos = prefs[Keys.INCLUDE_MVS] ?: false,
-        playbackSpeed = prefs[Keys.PLAYBACK_SPEED] ?: 1.0f,
-        playbackPitch = prefs[Keys.PLAYBACK_PITCH] ?: 1.0f,
-        showTrackThumbnails = prefs[Keys.SHOW_THUMBNAILS] ?: false
-    )
+    private fun fromPreferences(prefs: Preferences): UserPreferences {
+        val region = ContentRegions.normalize(prefs[Keys.CONTENT_REGION])
+        cachedRegionCode = region
+        return UserPreferences(
+            isDarkTheme = prefs[Keys.IS_DARK_THEME] ?: true,
+            ambientMode = prefs[Keys.AMBIENT_MODE]?.let { runCatching { AmbientMode.valueOf(it) }.getOrNull() }
+                ?: AmbientMode.AUDIO_REACTIVE,
+            ambientReactivity = prefs[Keys.AMBIENT_REACTIVITY]?.let { runCatching { AmbientReactivity.valueOf(it) }.getOrNull() }
+                ?: AmbientReactivity.EXPRESSIVE,
+            audioQuality = prefs[Keys.AUDIO_QUALITY]?.let { runCatching { AudioQuality.valueOf(it) }.getOrNull() }
+                ?: AudioQuality.HIGH,
+            downloadQuality = prefs[Keys.DOWNLOAD_QUALITY]?.let { runCatching { AudioQuality.valueOf(it) }.getOrNull() }
+                ?: AudioQuality.HIGH,
+            downloadWifiOnly = prefs[Keys.DOWNLOAD_WIFI_ONLY] ?: false,
+            smartDownloadsEnabled = prefs[Keys.SMART_DOWNLOADS_ENABLED] ?: false,
+            smartDownloadsLimit = prefs[Keys.SMART_DOWNLOADS_LIMIT] ?: 50,
+            recentlyPlayedDownloadsEnabled = prefs[Keys.RECENTLY_PLAYED_DOWNLOADS_ENABLED] ?: false,
+            recentlyPlayedDownloadsLimit = prefs[Keys.RECENTLY_PLAYED_DOWNLOADS_LIMIT] ?: 20,
+            capitalizeLabels = prefs[Keys.CAPITALIZE_LABELS] ?: false,
+            normalizeVolume = prefs[Keys.NORMALIZE_VOLUME] ?: true,
+            skipSilence = prefs[Keys.SKIP_SILENCE] ?: false,
+            autoMix = prefs[Keys.AUTO_MIX] ?: true,
+            sponsorBlockEnabled = prefs[Keys.SPONSOR_BLOCK] ?: false,
+            reportPlaybackHistory = prefs[Keys.REPORT_HISTORY] ?: true,
+            cacheLimitMb = prefs[Keys.CACHE_LIMIT_MB] ?: 1024,
+            includeMusicVideos = prefs[Keys.INCLUDE_MVS] ?: false,
+            playbackSpeed = prefs[Keys.PLAYBACK_SPEED] ?: 1.0f,
+            playbackPitch = prefs[Keys.PLAYBACK_PITCH] ?: 1.0f,
+            showTrackThumbnails = prefs[Keys.SHOW_THUMBNAILS] ?: false,
+            contentRegion = region
+        )
+    }
 
     val preferencesFlow: Flow<UserPreferences> = context.userPrefsDataStore.data.map(::fromPreferences)
 
     suspend fun current(): UserPreferences = preferencesFlow.first()
+
+    override suspend fun currentRegionCode(): String = cachedRegionCode ?: current().contentRegion
 
     suspend fun ensureNormalSpeedDefaultOnce() {
         context.userPrefsDataStore.edit { prefs ->
@@ -148,6 +161,9 @@ class PreferencesStore @Inject constructor(
             prefs[Keys.PLAYBACK_SPEED] = updated.playbackSpeed
             prefs[Keys.PLAYBACK_PITCH] = updated.playbackPitch
             prefs[Keys.SHOW_THUMBNAILS] = updated.showTrackThumbnails
+            val normalizedRegion = ContentRegions.normalize(updated.contentRegion)
+            prefs[Keys.CONTENT_REGION] = normalizedRegion
+            cachedRegionCode = normalizedRegion
         }
     }
 }

@@ -87,6 +87,7 @@ import coil3.request.crossfade
 import coil3.size.Precision
 import coil3.size.Size
 import com.lin.music.core.designsystem.background.AnimatedAmbientCanvas
+import com.lin.music.core.designsystem.components.LinLazyColumnScrollbar
 import com.lin.music.core.designsystem.components.LinOutlinedButton
 import com.lin.music.core.designsystem.components.LinScrubber
 import com.lin.music.core.designsystem.components.LinStatusMarquee
@@ -96,6 +97,7 @@ import com.lin.music.core.designsystem.components.formatDurationMs
 import com.lin.music.core.designsystem.components.highResArtworkUrl
 import com.lin.music.core.designsystem.icons.LinIcons
 import com.lin.music.core.designsystem.sheets.PlaylistEditorDialog
+import com.lin.music.core.designsystem.theme.APP_BRAND_NAME
 import com.lin.music.core.designsystem.theme.LinSharpShape
 import com.lin.music.core.designsystem.theme.LinTextStyles
 import com.lin.music.core.designsystem.theme.LinTheme
@@ -421,7 +423,7 @@ fun NowPlayingSheet(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("LIN", style = LinTextStyles.brand, color = linColors.textPrimary)
+                            Text(APP_BRAND_NAME, style = LinTextStyles.brand, color = accentColor)
                             Text(
                                 text = queueSnapshot.sourceLabel,
                                 style = LinTextStyles.subtitle,
@@ -1237,56 +1239,74 @@ private fun UpNextView(
             return
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
-        ) {
-            itemsIndexed(queueSnapshot.items, key = { idx, t -> "q_${idx}_${t.videoId}" }) { idx, track ->
-                val isCurrent = idx == queueSnapshot.currentIndex
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(linColors.queueItemBg)
-                        .border(width = if (isCurrent) 2.dp else 0.dp, color = if (isCurrent) accentColor else Color.Transparent)
-                        .clickable { onJumpTo(idx) }
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.padding(end = 10.dp)) {
-                        Text(
-                            "↑",
-                            style = LinTextStyles.subtitle,
-                            color = if (idx > 0) linColors.textSecondary else Color.Transparent,
-                            modifier = Modifier.clickable(enabled = idx > 0) { onMoveItem(idx, idx - 1) }.padding(2.dp)
-                        )
-                        Text(
-                            "↓",
-                            style = LinTextStyles.subtitle,
-                            color = if (idx < queueSnapshot.items.lastIndex) linColors.textSecondary else Color.Transparent,
-                            modifier = Modifier.clickable(enabled = idx < queueSnapshot.items.lastIndex) { onMoveItem(idx, idx + 1) }.padding(2.dp)
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            track.title,
-                            style = if (isCurrent) LinTextStyles.navItemActive else LinTextStyles.navItem,
-                            color = if (isCurrent) accentColor else linColors.textPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            track.artistDisplay,
-                            style = LinTextStyles.subtitle,
-                            color = linColors.textSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    IconButton(onClick = { onRemoveItem(idx) }) {
-                        Icon(LinIcons.Trash, "Remove", tint = linColors.textSecondary, modifier = Modifier.size(18.dp))
+        val queueListState = rememberLazyListState()
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                state = queueListState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(end = 18.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                itemsIndexed(queueSnapshot.items, key = { idx, t -> "q_${idx}_${t.videoId}" }) { idx, track ->
+                    val isCurrent = idx == queueSnapshot.currentIndex
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(linColors.queueItemBg)
+                            .border(width = if (isCurrent) 2.dp else 0.dp, color = if (isCurrent) accentColor else Color.Transparent)
+                            .clickable { onJumpTo(idx) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.padding(end = 10.dp)) {
+                            Text(
+                                "↑",
+                                style = LinTextStyles.subtitle,
+                                color = if (idx > 0) linColors.textSecondary else Color.Transparent,
+                                modifier = Modifier.clickable(enabled = idx > 0) { onMoveItem(idx, idx - 1) }.padding(2.dp)
+                            )
+                            Text(
+                                "↓",
+                                style = LinTextStyles.subtitle,
+                                color = if (idx < queueSnapshot.items.lastIndex) linColors.textSecondary else Color.Transparent,
+                                modifier = Modifier.clickable(enabled = idx < queueSnapshot.items.lastIndex) { onMoveItem(idx, idx + 1) }.padding(2.dp)
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                track.title,
+                                style = if (isCurrent) LinTextStyles.navItemActive else LinTextStyles.navItem,
+                                color = if (isCurrent) accentColor else linColors.textPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                track.artistDisplay,
+                                style = LinTextStyles.subtitle,
+                                color = linColors.textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        IconButton(onClick = { onRemoveItem(idx) }) {
+                            Icon(LinIcons.Trash, "Remove", tint = linColors.textSecondary, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             }
+
+            LinLazyColumnScrollbar(
+                listState = queueListState,
+                accentColor = accentColor,
+                modifier = Modifier.align(Alignment.CenterEnd),
+                topPadding = 4.dp,
+                bottomPadding = 12.dp,
+                labelProvider = { idx ->
+                    if (queueSnapshot.items.isNotEmpty()) {
+                        "${idx.coerceIn(0, queueSnapshot.items.lastIndex) + 1} / ${queueSnapshot.items.size}"
+                    } else null
+                }
+            )
         }
     }
 }

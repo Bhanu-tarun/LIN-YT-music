@@ -5,9 +5,12 @@ import com.lin.music.core.innertube.client.YouTubeClient
 import com.lin.music.core.innertube.parser.InnerTubeParsers
 import com.lin.music.core.model.AccountSession
 import com.lin.music.core.model.AlbumDetail
+import com.lin.music.core.model.AlbumRef
 import com.lin.music.core.model.AlbumSummary
 import com.lin.music.core.model.ArtistDetail
+import com.lin.music.core.model.ArtistRef
 import com.lin.music.core.model.ArtistSummary
+import com.lin.music.core.model.ContentRegions
 import com.lin.music.core.model.HomePage
 import com.lin.music.core.model.NextPage
 import com.lin.music.core.model.PlaylistDetail
@@ -48,13 +51,29 @@ interface SessionProvider {
     suspend fun currentSession(): AccountSession?
 }
 
+fun interface RegionProvider {
+    suspend fun currentRegionCode(): String
+}
+
 @Singleton
 class InnerTubeApi @Inject constructor(
     private val sessionProvider: SessionProvider,
+    private val regionProvider: RegionProvider,
     private val okHttpClient: OkHttpClient
 ) {
+    constructor(
+        sessionProvider: SessionProvider,
+        okHttpClient: OkHttpClient
+    ) : this(sessionProvider, RegionProvider { ContentRegions.DEFAULT_CODE }, okHttpClient)
+
     internal var baseUrl: String? = null
     private val visitorDataCache = ConcurrentHashMap<String, Pair<String, Long>>()
+
+    suspend fun currentRegionCode(): String = ContentRegions.normalize(regionProvider.currentRegionCode())
+
+    fun clearVisitorDataCache() {
+        visitorDataCache.clear()
+    }
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -69,21 +88,24 @@ class InnerTubeApi @Inject constructor(
 
     suspend fun fetchVisitorData(client: YouTubeClient, forceRefresh: Boolean = false): String? {
         val now = System.currentTimeMillis()
+        val region = currentRegionCode()
+        val cacheKey = "${client.name}:$region"
         if (!forceRefresh) {
-            visitorDataCache[client.name]?.let { (vd, cachedAt) ->
+            visitorDataCache[cacheKey]?.let { (vd, cachedAt) ->
                 if (now - cachedAt < 30L * 60_000L && vd.isNotBlank()) return vd
             }
         }
         return runCatching {
             val host = baseUrl ?: client.apiHost
             val payload = buildJsonObject {
-                put("context", client.buildContextJson())
+                put("context", client.buildContextJson(regionCode = region))
             }
             val response = httpClient.post("${host}visitor_id") {
                 parameter("prettyPrint", "false")
                 header("User-Agent", client.userAgent)
                 header("X-YouTube-Client-Name", client.clientId)
                 header("X-YouTube-Client-Version", client.clientVersion)
+                header("Accept-Language", "en-$region,en;q=0.9")
                 contentType(ContentType.Application.Json)
                 setBody(payload)
             }
@@ -94,7 +116,7 @@ class InnerTubeApi @Inject constructor(
                 ?.let { (it as? JsonPrimitive)?.contentOrNull }
                 ?.takeIf { it.isNotBlank() }
             if (vd != null) {
-                visitorDataCache[client.name] = vd to now
+                visitorDataCache[cacheKey] = vd to now
             }
             vd
         }.getOrNull()
@@ -107,16 +129,17 @@ class InnerTubeApi @Inject constructor(
         queryParams: Map<String, String> = emptyMap(),
         visitorDataOverride: String? = null
     ): JsonObject {
+        val region = currentRegionCode()
         val session = if (client.supportsAuthCookies) sessionProvider.currentSession() else null
         val authHeaders = if (client.supportsAuthCookies) {
-            SapisidAuthSigner.buildSessionHeaders(session)
+            SapisidAuthSigner.buildSessionHeaders(session, regionCode = region)
         } else {
             emptyMap()
         }
         val effectiveVisitorData = visitorDataOverride ?: session?.visitorData
 
         val payload = buildJsonObject {
-            put("context", client.buildContextJson(visitorData = effectiveVisitorData))
+            put("context", client.buildContextJson(visitorData = effectiveVisitorData, regionCode = region))
             bodyBuilder()
         }
 
@@ -127,6 +150,9 @@ class InnerTubeApi @Inject constructor(
             header("User-Agent", client.userAgent)
             header("X-YouTube-Client-Name", client.clientId)
             header("X-YouTube-Client-Version", client.clientVersion)
+            if (!client.supportsAuthCookies) {
+                header("Accept-Language", "en-$region,en;q=0.9")
+            }
             if (!client.supportsAuthCookies && !effectiveVisitorData.isNullOrBlank()) {
                 header("X-Goog-Visitor-Id", effectiveVisitorData)
             }
@@ -161,24 +187,28 @@ class InnerTubeApi @Inject constructor(
     }
 
     suspend fun getLibrarySongs(continuation: String? = null): Pair<List<Track>, String?> {
-        val params = if (continuation != null) mapOf("continuation" to continuation, "type" to "next") else emptyMap()
         val root = postInnerTube(
             endpoint = "browse",
-            queryParams = params,
             bodyBuilder = {
-                if (continuation == null) put("browseId", "FEmusic_liked_videos")
+                if (continuation != null) {
+                    put("continuation", continuation)
+                } else {
+                    put("browseId", "FEmusic_liked_videos")
+                }
             }
         )
         return InnerTubeParsers.parseTracksFromBrowseShelf(root)
     }
 
     suspend fun getLikedSongs(continuation: String? = null): PlaylistDetail {
-        val params = if (continuation != null) mapOf("continuation" to continuation, "type" to "next") else emptyMap()
         val root = postInnerTube(
             endpoint = "browse",
-            queryParams = params,
             bodyBuilder = {
-                if (continuation == null) put("browseId", "VLLM")
+                if (continuation != null) {
+                    put("continuation", continuation)
+                } else {
+                    put("browseId", "VLLM")
+                }
             }
         )
         return InnerTubeParsers.parsePlaylistResponse(root, "VLLM")
@@ -214,9 +244,30 @@ class InnerTubeApi @Inject constructor(
         return InnerTubeParsers.parseLibraryArtists(fallbackRoot)
     }
 
-    suspend fun getAlbum(browseId: String): AlbumDetail {
-        val root = postInnerTube("browse", bodyBuilder = { put("browseId", browseId) })
-        return InnerTubeParsers.parseAlbumResponse(root, browseId)
+    suspend fun getAlbum(
+        browseId: String,
+        continuation: String? = null,
+        fallbackAlbum: AlbumRef? = null,
+        fallbackArtists: List<ArtistRef> = emptyList(),
+        fallbackThumb: String? = null
+    ): AlbumDetail {
+        val root = postInnerTube(
+            endpoint = "browse",
+            bodyBuilder = {
+                if (continuation != null) {
+                    put("continuation", continuation)
+                } else {
+                    put("browseId", browseId)
+                }
+            }
+        )
+        return InnerTubeParsers.parseAlbumResponse(
+            root = root,
+            browseId = browseId,
+            fallbackAlbum = fallbackAlbum,
+            fallbackArtists = fallbackArtists,
+            fallbackThumb = fallbackThumb
+        )
     }
 
     suspend fun getArtist(browseId: String): ArtistDetail {
@@ -230,12 +281,14 @@ class InnerTubeApi @Inject constructor(
         } else {
             browseId
         }
-        val params = if (continuation != null) mapOf("continuation" to continuation, "type" to "next") else emptyMap()
         val root = postInnerTube(
             endpoint = "browse",
-            queryParams = params,
             bodyBuilder = {
-                if (continuation == null) put("browseId", normalizedId)
+                if (continuation != null) {
+                    put("continuation", continuation)
+                } else {
+                    put("browseId", normalizedId)
+                }
             }
         )
         return InnerTubeParsers.parsePlaylistResponse(root, normalizedId)

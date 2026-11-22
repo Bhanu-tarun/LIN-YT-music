@@ -1,5 +1,6 @@
 package com.lin.music.core.innertube.client
 
+import com.lin.music.core.model.ContentRegions
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -71,12 +72,16 @@ enum class YouTubeClient(
         supportsAuthCookies = false
     );
 
-    fun buildContextJson(visitorData: String? = null): JsonObject = buildJsonObject {
+    fun buildContextJson(
+        visitorData: String? = null,
+        regionCode: String = ContentRegions.DEFAULT_CODE
+    ): JsonObject = buildJsonObject {
+        val gl = ContentRegions.normalize(regionCode)
         put("client", buildJsonObject {
             put("clientName", clientName)
             put("clientVersion", clientVersion)
             put("hl", "en")
-            put("gl", "US")
+            put("gl", gl)
             if (!visitorData.isNullOrBlank()) {
                 put("visitorData", visitorData)
             }

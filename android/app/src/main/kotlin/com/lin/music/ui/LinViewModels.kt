@@ -25,6 +25,7 @@ import com.lin.music.core.model.AmbientReactivity
 import com.lin.music.core.model.ArtistDetail
 import com.lin.music.core.model.ArtistRef
 import com.lin.music.core.model.AudioQuality
+import com.lin.music.core.model.ContentRegions
 import com.lin.music.core.model.HomeItem
 import com.lin.music.core.model.HomeSection
 import com.lin.music.core.model.LyricsResult
@@ -46,6 +47,7 @@ import com.lin.music.core.playback.queue.QueueUndoToken
 import com.lin.music.util.ShareHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -58,6 +60,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
@@ -916,6 +920,15 @@ class HomeViewModel @Inject constructor(
                     if (valid) refresh(includeLibrary = false)
                 }
         }
+        viewModelScope.launch {
+            repository.contentRegionFlow
+                .drop(1)
+                .collectLatest {
+                    if (repository.sessionFlow.first()?.isValid == true) {
+                        refresh(includeLibrary = false)
+                    }
+                }
+        }
     }
 
     fun refresh(includeLibrary: Boolean = true) {
@@ -1194,28 +1207,56 @@ class DetailViewModel @Inject constructor(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    private val _isLoadingMore = MutableStateFlow(false)
+    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
+
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    private var albumLoadJob: Job? = null
+    private var playlistLoadJob: Job? = null
+
     fun loadAlbum(browseId: String) {
-        viewModelScope.launch {
+        albumLoadJob?.cancel()
+        albumLoadJob = viewModelScope.launch {
             _isLoading.value = true
+            _isLoadingMore.value = false
             _error.value = null
-            runCatching { repository.getAlbum(browseId) }
-                .onSuccess { _album.value = it }
-                .onFailure { _error.value = it.message }
-            _isLoading.value = false
+            try {
+                repository.loadAlbumProgressive(browseId) { detail, loadingMore ->
+                    _album.value = detail
+                    _isLoading.value = false
+                    _isLoadingMore.value = loadingMore
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _error.value = t.message
+            } finally {
+                _isLoading.value = false
+                _isLoadingMore.value = false
+            }
         }
     }
 
     fun loadPlaylist(browseId: String) {
-        viewModelScope.launch {
+        playlistLoadJob?.cancel()
+        playlistLoadJob = viewModelScope.launch {
             _isLoading.value = true
+            _isLoadingMore.value = false
             _error.value = null
-            runCatching { repository.getPlaylist(browseId) }
-                .onSuccess { _playlist.value = it }
-                .onFailure { _error.value = it.message }
-            _isLoading.value = false
+            try {
+                repository.loadPlaylistProgressive(browseId) { detail, loadingMore ->
+                    _playlist.value = detail
+                    _isLoading.value = false
+                    _isLoadingMore.value = loadingMore
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _error.value = t.message
+            } finally {
+                _isLoading.value = false
+                _isLoadingMore.value = false
+            }
         }
     }
 
@@ -1418,6 +1459,15 @@ class SettingsViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Lazily, UserPreferences())
 
     fun setDarkTheme(dark: Boolean) = update { it.copy(isDarkTheme = dark) }
+    fun setContentRegion(regionCode: String) {
+        val normalized = ContentRegions.normalize(regionCode)
+        viewModelScope.launch {
+            preferencesStore.update { it.copy(contentRegion = normalized) }
+            withContext(Dispatchers.IO) {
+                runCatching { repository.onContentRegionChanged() }
+            }
+        }
+    }
     fun setAmbientMode(mode: AmbientMode) = update { it.copy(ambientMode = mode) }
     fun setAmbientReactivity(r: AmbientReactivity) = update { it.copy(ambientReactivity = r) }
     fun setAudioQuality(q: AudioQuality) = update { it.copy(audioQuality = q) }

@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -57,6 +58,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import coil3.compose.AsyncImage
 import com.lin.music.core.designsystem.components.LinInvertedButton
+import com.lin.music.core.designsystem.components.LinLazyColumnScrollbar
+import com.lin.music.core.designsystem.components.LinLazyGridScrollbar
 import com.lin.music.core.designsystem.components.LinOutlinedButton
 import com.lin.music.core.designsystem.components.LinTagPill
 import com.lin.music.core.designsystem.components.LinTrackArtHoverOverlay
@@ -364,6 +367,18 @@ fun SongsScreen(
             imageUrl = if (previewedKey != null) previewArtUrl else null,
             centerYPx = previewCenterYPx,
             viewportHeightPx = viewportHeightPx
+        )
+
+        LinLazyColumnScrollbar(
+            listState = listState,
+            accentColor = accentColor,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            bottomPadding = 172.dp,
+            labelProvider = { idx ->
+                if (filtered.isNotEmpty()) {
+                    "${(idx - 1).coerceIn(0, filtered.lastIndex) + 1} / ${filtered.size}"
+                } else null
+            }
         )
     }
 }
@@ -743,6 +758,13 @@ fun DownloadsHubScreen(
             centerYPx = previewCenterYPx,
             viewportHeightPx = viewportHeightPx
         )
+
+        LinLazyColumnScrollbar(
+            listState = listState,
+            accentColor = accentColor,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            bottomPadding = 172.dp
+        )
     }
 }
 
@@ -751,6 +773,7 @@ fun DownloadsHubScreen(
 fun PlaylistsScreen(
     playlists: List<PlaylistSummary>,
     activeTagFilter: String?,
+    accentColor: Color,
     onTagClick: (String) -> Unit,
     onPlaylistClick: (String) -> Unit,
     onSwipeRightPlayNext: (PlaylistSummary) -> Unit,
@@ -760,6 +783,7 @@ fun PlaylistsScreen(
 ) {
     val linColors = LinTheme.colors
     val haptic = LocalHapticFeedback.current
+    val gridState = rememberLazyGridState()
     var showCreate by remember { mutableStateOf(false) }
     var longPressedPlaylist by remember { mutableStateOf<PlaylistSummary?>(null) }
 
@@ -768,80 +792,90 @@ fun PlaylistsScreen(
         else playlists.filter { activeTagFilter in it.tags }
     }
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 180.dp),
-        horizontalArrangement = Arrangement.spacedBy(20.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp)
-    ) {
-        item(span = { GridItemSpan(2) }) {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                LinInvertedButton(text = "create new", onClick = { showCreate = true })
-                if (activeTagFilter != null) {
-                    LinTagPill("#$activeTagFilter ×", active = true, onClick = { onTagClick(activeTagFilter) })
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 180.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
+            item(span = { GridItemSpan(2) }) {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    LinInvertedButton(text = "create new", onClick = { showCreate = true })
+                    if (activeTagFilter != null) {
+                        LinTagPill("#$activeTagFilter ×", active = true, onClick = { onTagClick(activeTagFilter) })
+                    }
+                }
+            }
+
+            if (filtered.isEmpty()) {
+                item(span = { GridItemSpan(2) }) {
+                    Text(
+                        text = linLabel("no playlists found."),
+                        style = LinTextStyles.sectionHeading,
+                        color = linColors.textSecondary
+                    )
+                }
+            } else {
+                itemsIndexed(filtered, key = { idx, it -> "pl_${idx}_${it.id}" }) { _, pl ->
+                    Column(
+                        modifier = Modifier.combinedClickable(
+                            onClick = { onPlaylistClick(pl.browseId) },
+                            onLongClick = {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                longPressedPlaylist = pl
+                            }
+                        )
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(1f)
+                                .clip(LinSharpShape)
+                                .background(linColors.glassBorder)
+                        ) {
+                            if (!pl.thumbnailUrl.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = pl.thumbnailUrl,
+                                    contentDescription = pl.title,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            text = pl.title,
+                            style = LinTextStyles.navItemActive,
+                            color = linColors.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val sub = pl.subtitle ?: pl.trackCount?.let { "$it tracks" } ?: linLabel("Playlist")
+                        Text(
+                            text = sub,
+                            style = LinTextStyles.subtitle,
+                            color = linColors.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }
 
-        if (filtered.isEmpty()) {
-            item(span = { GridItemSpan(2) }) {
-                Text(
-                    text = linLabel("no playlists found."),
-                    style = LinTextStyles.sectionHeading,
-                    color = linColors.textSecondary
-                )
-            }
-        } else {
-            itemsIndexed(filtered, key = { idx, it -> "pl_${idx}_${it.id}" }) { _, pl ->
-                Column(
-                    modifier = Modifier.combinedClickable(
-                        onClick = { onPlaylistClick(pl.browseId) },
-                        onLongClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            longPressedPlaylist = pl
-                        }
-                    )
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(1f)
-                            .clip(LinSharpShape)
-                            .background(linColors.glassBorder)
-                    ) {
-                        if (!pl.thumbnailUrl.isNullOrBlank()) {
-                            AsyncImage(
-                                model = pl.thumbnailUrl,
-                                contentDescription = pl.title,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = pl.title,
-                        style = LinTextStyles.navItemActive,
-                        color = linColors.textPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    val sub = pl.subtitle ?: pl.trackCount?.let { "$it tracks" } ?: linLabel("Playlist")
-                    Text(
-                        text = sub,
-                        style = LinTextStyles.subtitle,
-                        color = linColors.textSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
+        LinLazyGridScrollbar(
+            gridState = gridState,
+            accentColor = accentColor,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            bottomPadding = 172.dp
+        )
     }
 
     longPressedPlaylist?.let { pl ->

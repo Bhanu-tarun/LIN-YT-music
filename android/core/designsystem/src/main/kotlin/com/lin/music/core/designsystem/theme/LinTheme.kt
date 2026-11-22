@@ -13,9 +13,13 @@ import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -80,7 +84,9 @@ val LinLightColors = LinColors(
 val LocalLinColors = staticCompositionLocalOf { LinDarkColors }
 val LocalCapitalizeLabels = staticCompositionLocalOf { false }
 
+const val APP_BRAND_NAME = "LIN"
 val LinBrandOrange = Color(0xFFF9721F)
+private val BRAND_WORD_REGEX = Regex("\\bLIN\\b")
 
 @Composable
 @ReadOnlyComposable
@@ -89,11 +95,37 @@ fun linLabel(text: String): String = formatLinLabel(text, LocalCapitalizeLabels.
 fun formatLinLabel(text: String, capitalize: Boolean): String {
     if (!capitalize || text.isBlank()) return text
     return text.split(" ").joinToString(" ") { word ->
-        if (word.startsWith("#")) word
-        else {
+        if (word == APP_BRAND_NAME || word.startsWith("#")) {
+            word
+        } else {
             val idx = word.indexOfFirst { it.isLetter() }
             if (idx < 0) word
             else word.substring(0, idx) + word[idx].uppercaseChar() + word.substring(idx + 1)
+        }
+    }
+}
+
+fun linBrandText(
+    text: String,
+    accentColor: Color,
+    baseColor: Color
+): AnnotatedString = buildAnnotatedString {
+    var cursor = 0
+    for (match in BRAND_WORD_REGEX.findAll(text)) {
+        val start = match.range.first
+        if (start > cursor) {
+            withStyle(SpanStyle(color = baseColor)) {
+                append(text.substring(cursor, start))
+            }
+        }
+        withStyle(SpanStyle(color = accentColor)) {
+            append(match.value)
+        }
+        cursor = match.range.last + 1
+    }
+    if (cursor < text.length) {
+        withStyle(SpanStyle(color = baseColor)) {
+            append(text.substring(cursor))
         }
     }
 }

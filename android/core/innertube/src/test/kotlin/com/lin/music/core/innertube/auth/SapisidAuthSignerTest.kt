@@ -79,4 +79,21 @@ class SapisidAuthSignerTest {
         val headers = SapisidAuthSigner.buildSessionHeaders(session, timestampSeconds = 1700000000L)
         assertNull(headers["X-Goog-PageId"])
     }
+
+    @Test
+    fun `buildSessionHeaders formats Accept-Language from regionCode`() {
+        val headersJp = SapisidAuthSigner.buildSessionHeaders(
+            session = null,
+            timestampSeconds = 1700000000L,
+            regionCode = "jp"
+        )
+        assertEquals("en-JP,en;q=0.9", headersJp["Accept-Language"])
+
+        val headersInvalid = SapisidAuthSigner.buildSessionHeaders(
+            session = null,
+            timestampSeconds = 1700000000L,
+            regionCode = "INVALID"
+        )
+        assertEquals("en-US,en;q=0.9", headersInvalid["Accept-Language"])
+    }
 }

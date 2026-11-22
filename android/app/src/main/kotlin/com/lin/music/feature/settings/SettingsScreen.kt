@@ -30,6 +30,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.lin.music.core.designsystem.components.LinInvertedButton
@@ -38,13 +39,17 @@ import com.lin.music.core.designsystem.components.LinSquareToggle
 import com.lin.music.core.designsystem.components.LinTagPill
 import com.lin.music.core.designsystem.icons.LinIcons
 import com.lin.music.core.designsystem.sheets.LinUnderlineTextField
+import com.lin.music.core.designsystem.theme.APP_BRAND_NAME
 import com.lin.music.core.designsystem.theme.LinTextStyles
 import com.lin.music.core.designsystem.theme.LinTheme
+import com.lin.music.core.designsystem.theme.linBrandText
 import com.lin.music.core.designsystem.theme.linLabel
 import com.lin.music.core.model.AccountSession
 import com.lin.music.core.model.AmbientMode
 import com.lin.music.core.model.AmbientReactivity
 import com.lin.music.core.model.AudioQuality
+import com.lin.music.core.model.ContentRegionOption
+import com.lin.music.core.model.ContentRegions
 import com.lin.music.core.model.UserPreferences
 import com.lin.music.util.ShareHelper
 import kotlinx.coroutines.launch
@@ -55,12 +60,14 @@ import kotlin.math.abs
 fun SettingsScreen(
     session: AccountSession?,
     preferences: UserPreferences,
+    accentColor: Color,
     audioSessionId: Int,
     downloadedCount: Int,
     cacheSizeBytes: Long,
     onBack: () -> Unit,
     onSyncNow: () -> Unit,
     onLogout: () -> Unit,
+    onSetContentRegion: (String) -> Unit,
     onSetDarkTheme: (Boolean) -> Unit,
     onSetCapitalizeLabels: (Boolean) -> Unit,
     onSetAmbientMode: (AmbientMode) -> Unit,
@@ -93,6 +100,8 @@ fun SettingsScreen(
     val scope = rememberCoroutineScope()
     var importJsonInput by remember { mutableStateOf("") }
     var showImportBox by remember { mutableStateOf(false) }
+    var showCountryPicker by remember { mutableStateOf(false) }
+    var regionSearch by remember { mutableStateOf("") }
     var displayedCacheBytes by remember(cacheSizeBytes) { mutableStateOf(cacheSizeBytes) }
 
     LazyColumn(
@@ -129,10 +138,138 @@ fun SettingsScreen(
             }
         }
 
+        // Content Location
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(linLabel("content location"), style = LinTextStyles.sectionHeading, color = linColors.textPrimary)
+                Text(
+                    text = linLabel("active region: ${ContentRegions.displayNameFor(preferences.contentRegion).lowercase()}"),
+                    style = LinTextStyles.subtitle,
+                    color = accentColor
+                )
+                Text(
+                    text = linLabel("changes youtube music catalog, charts & stream region (strict ip geo-blocks may still need a vpn)"),
+                    style = LinTextStyles.subtitle,
+                    color = linColors.textSecondary
+                )
+
+                val quickOptions = remember(preferences.contentRegion) {
+                    val activeCode = ContentRegions.normalize(preferences.contentRegion)
+                    val presets = ContentRegions.quickPresets
+                    if (presets.any { it.code == activeCode }) {
+                        presets
+                    } else {
+                        val activeName = ContentRegions.allCountries()
+                            .firstOrNull { it.code == activeCode }
+                            ?.name
+                            ?: activeCode
+                        listOf(ContentRegionOption(activeCode, activeName)) + presets
+                    }
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    quickOptions.forEach { option ->
+                        LinTagPill(
+                            text = "${linLabel(option.name.lowercase())} (${option.code})",
+                            active = preferences.contentRegion == option.code,
+                            onClick = {
+                                onSetContentRegion(option.code)
+                                onToast("location set to ${option.name.lowercase()} (${option.code})")
+                            }
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    LinOutlinedButton(
+                        text = if (showCountryPicker) "hide countries" else "choose any country",
+                        onClick = { showCountryPicker = !showCountryPicker }
+                    )
+                    LinOutlinedButton(
+                        text = "device region",
+                        onClick = {
+                            val code = ContentRegions.deviceRegionCode()
+                            onSetContentRegion(code)
+                            onToast("location set to ${ContentRegions.displayNameFor(code).lowercase()}")
+                        }
+                    )
+                }
+
+                if (showCountryPicker) {
+                    val allCountries = remember { ContentRegions.allCountries() }
+                    val query = regionSearch.trim()
+                    val filtered = remember(query, allCountries) {
+                        if (query.isBlank()) {
+                            allCountries.take(24)
+                        } else {
+                            allCountries
+                                .filter {
+                                    it.name.contains(query, ignoreCase = true) ||
+                                        it.code.equals(query, ignoreCase = true) ||
+                                        it.code.startsWith(query, ignoreCase = true)
+                                }
+                                .sortedByDescending { it.code.equals(query, ignoreCase = true) }
+                                .take(24)
+                        }
+                    }
+
+                    LinUnderlineTextField(
+                        value = regionSearch,
+                        onValueChange = { regionSearch = it },
+                        placeholder = "search country or 2-letter iso code (e.g. japan, jp)..."
+                    )
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        filtered.forEach { option ->
+                            LinTagPill(
+                                text = "${linLabel(option.name.lowercase())} (${option.code})",
+                                active = preferences.contentRegion == option.code,
+                                onClick = {
+                                    onSetContentRegion(option.code)
+                                    showCountryPicker = false
+                                    regionSearch = ""
+                                    onToast("location set to ${option.name.lowercase()} (${option.code})")
+                                }
+                            )
+                        }
+                    }
+
+                    val exactCodeMatch = ContentRegions.isValidCode(query) &&
+                        filtered.any { it.code.equals(query, ignoreCase = true) }
+                    if (ContentRegions.isValidCode(query) && !exactCodeMatch) {
+                        val customCode = ContentRegions.normalize(query)
+                        LinOutlinedButton(
+                            text = "use custom code $customCode",
+                            onClick = {
+                                onSetContentRegion(customCode)
+                                showCountryPicker = false
+                                regionSearch = ""
+                                onToast("location set to ${ContentRegions.displayNameFor(customCode).lowercase()}")
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        item { HorizontalDivider(color = linColors.glassBorder) }
+
         // Visuals & Theme
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(linLabel("visuals · LIN"), style = LinTextStyles.sectionHeading, color = linColors.textPrimary)
+                Text(
+                    text = linBrandText(
+                        text = "${linLabel("visuals")} · $APP_BRAND_NAME",
+                        accentColor = accentColor,
+                        baseColor = linColors.textPrimary
+                    ),
+                    style = LinTextStyles.sectionHeading
+                )
                 SettingToggleRow(linLabel("dark theme (oled black)"), preferences.isDarkTheme, onSetDarkTheme)
                 SettingToggleRow(linLabel("capitalize first letters"), preferences.capitalizeLabels, onSetCapitalizeLabels)
                 SettingToggleRow(linLabel("show track thumbnails in lists"), preferences.showTrackThumbnails, onSetShowThumbnails)

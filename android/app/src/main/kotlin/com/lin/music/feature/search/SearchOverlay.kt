@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -46,6 +47,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.lin.music.core.designsystem.components.LinLazyColumnScrollbar
 import com.lin.music.core.designsystem.components.LinTagPill
 import com.lin.music.core.designsystem.components.SwipeableTrackRow
 import com.lin.music.core.designsystem.icons.LinIcons
@@ -163,11 +165,14 @@ fun SearchOverlay(
 
         Spacer(Modifier.height(14.dp))
 
-        LazyColumn(
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(bottom = 120.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
-        ) {
+        val listState = rememberLazyListState()
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(end = 18.dp, bottom = 120.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
             if (query.isBlank() && history.isNotEmpty()) {
                 item {
                     Text(
@@ -295,6 +300,15 @@ fun SearchOverlay(
                     }
                 }
             }
+            }
+
+            LinLazyColumnScrollbar(
+                listState = listState,
+                accentColor = accentColor,
+                modifier = Modifier.align(Alignment.CenterEnd),
+                topPadding = 4.dp,
+                bottomPadding = 112.dp
+            )
         }
     }
 }

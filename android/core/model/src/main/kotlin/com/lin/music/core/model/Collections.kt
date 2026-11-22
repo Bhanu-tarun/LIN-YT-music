@@ -58,6 +58,7 @@ data class AlbumDetail(
     val isEpOrSingle: Boolean = false,
     val thumbnailUrl: String? = null,
     val tracks: List<Track> = emptyList(),
+    val continuation: String? = null,
     val inLibrary: Boolean = false,
     val tags: List<String> = emptyList()
 ) {

@@ -631,4 +631,234 @@ class InnerTubeParsersTest {
         assertEquals("v1", deduped[0].videoId)
         assertTrue(deduped.none { it.videoId == "v2" })
     }
+
+    @Test
+    fun `parsePlaylistResponse extracts shelf continuationCommand over sectionList nextContinuationData and ignores suggested shelf tracks`() {
+        val fixture = """
+        {
+          "header": {
+            "musicResponsiveHeaderRenderer": {
+              "title": { "runs": [{ "text": "Giant Playlist" }] },
+              "subtitle": { "runs": [{ "text": "Playlist" }] }
+            }
+          },
+          "contents": {
+            "twoColumnBrowseResultsRenderer": {
+              "secondaryContents": {
+                "sectionListRenderer": {
+                  "continuations": [
+                    { "nextContinuationData": { "continuation": "RELATED_SHELF_TOKEN" } }
+                  ],
+                  "contents": [
+                    {
+                      "musicPlaylistShelfRenderer": {
+                        "contents": [
+                          {
+                            "musicResponsiveListItemRenderer": {
+                              "playlistItemData": { "videoId": "plTrack1" },
+                              "flexColumns": [
+                                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Track 1" }] } } }
+                              ]
+                            }
+                          },
+                          {
+                            "continuationItemRenderer": {
+                              "continuationEndpoint": {
+                                "continuationCommand": { "token": "PLAYLIST_PAGE_2" }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "musicShelfRenderer": {
+                        "contents": [
+                          {
+                            "musicResponsiveListItemRenderer": {
+                              "playlistItemData": { "videoId": "suggestedShouldIgnore" },
+                              "flexColumns": [
+                                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Suggested Track" }] } } }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+        """.trimIndent()
+
+        val detail = InnerTubeParsers.parsePlaylistResponse(json.parseToJsonElement(fixture).jsonObject, "VLPL_GIANT")
+        assertEquals(listOf("plTrack1"), detail.tracks.map { it.videoId })
+        assertEquals("PLAYLIST_PAGE_2", detail.continuation)
+    }
+
+    @Test
+    fun `parsePlaylistResponse parses appendContinuationItemsAction pages and stops when no token`() {
+        val page2Fixture = """
+        {
+          "onResponseReceivedActions": [
+            {
+              "appendContinuationItemsAction": {
+                "continuationItems": [
+                  {
+                    "musicResponsiveListItemRenderer": {
+                      "playlistItemData": { "videoId": "contTrack101" },
+                      "flexColumns": [
+                        { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Track 101" }] } } }
+                      ]
+                    }
+                  },
+                  {
+                    "musicResponsiveListItemRenderer": {
+                      "playlistItemData": { "videoId": "contTrack102" },
+                      "flexColumns": [
+                        { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Track 102" }] } } }
+                      ]
+                    }
+                  },
+                  {
+                    "continuationItemRenderer": {
+                      "continuationEndpoint": {
+                        "continuationCommand": { "token": "PLAYLIST_PAGE_3" }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val page2 = InnerTubeParsers.parsePlaylistResponse(json.parseToJsonElement(page2Fixture).jsonObject, "VLPL_GIANT")
+        assertEquals(listOf("contTrack101", "contTrack102"), page2.tracks.map { it.videoId })
+        assertEquals("PLAYLIST_PAGE_3", page2.continuation)
+
+        val finalPageFixture = """
+        {
+          "onResponseReceivedActions": [
+            {
+              "appendContinuationItemsAction": {
+                "continuationItems": [
+                  {
+                    "musicResponsiveListItemRenderer": {
+                      "playlistItemData": { "videoId": "contTrack201" },
+                      "flexColumns": [
+                        { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Track 201" }] } } }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val finalPage = InnerTubeParsers.parsePlaylistResponse(json.parseToJsonElement(finalPageFixture).jsonObject, "VLPL_GIANT")
+        assertEquals(listOf("contTrack201"), finalPage.tracks.map { it.videoId })
+        assertEquals(null, finalPage.continuation)
+    }
+
+    @Test
+    fun `parseAlbumResponse extracts shelf continuation and applies album fallbacks on continuation pages`() {
+        val page1Fixture = """
+        {
+          "header": {
+            "musicResponsiveHeaderRenderer": {
+              "title": { "runs": [{ "text": "Anthology Box Set" }] },
+              "straplineTextOne": {
+                "runs": [
+                  {
+                    "text": "Orchestra",
+                    "navigationEndpoint": { "browseEndpoint": { "browseId": "UC_ORCH" } }
+                  }
+                ]
+              }
+            }
+          },
+          "contents": {
+            "twoColumnBrowseResultsRenderer": {
+              "secondaryContents": {
+                "sectionListRenderer": {
+                  "continuations": [
+                    { "nextContinuationData": { "continuation": "OTHER_VERSIONS_SHELF" } }
+                  ],
+                  "contents": [
+                    {
+                      "musicShelfRenderer": {
+                        "contents": [
+                          {
+                            "musicResponsiveListItemRenderer": {
+                              "playlistItemData": { "videoId": "alb1" },
+                              "flexColumns": [
+                                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Movement 1" }] } } }
+                              ]
+                            }
+                          },
+                          {
+                            "continuationItemRenderer": {
+                              "continuationEndpoint": {
+                                "continuationCommand": { "token": "ALBUM_PAGE_2" }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+        """.trimIndent()
+
+        val page1 = InnerTubeParsers.parseAlbumResponse(json.parseToJsonElement(page1Fixture).jsonObject, "MPREb_box1")
+        assertEquals("ALBUM_PAGE_2", page1.continuation)
+        assertEquals(listOf("alb1"), page1.tracks.map { it.videoId })
+
+        val page2Fixture = """
+        {
+          "onResponseReceivedActions": [
+            {
+              "appendContinuationItemsAction": {
+                "continuationItems": [
+                  {
+                    "musicResponsiveListItemRenderer": {
+                      "playlistItemData": { "videoId": "alb101" },
+                      "flexColumns": [
+                        { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Movement 101" }] } } }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val page2 = InnerTubeParsers.parseAlbumResponse(
+            root = json.parseToJsonElement(page2Fixture).jsonObject,
+            browseId = "MPREb_box1",
+            fallbackAlbum = com.lin.music.core.model.AlbumRef("MPREb_box1", page1.title),
+            fallbackArtists = page1.artists,
+            fallbackThumb = "https://example.com/box.jpg"
+        )
+        assertEquals(null, page2.continuation)
+        assertEquals(1, page2.tracks.size)
+        val t = page2.tracks.first()
+        assertEquals("alb101", t.videoId)
+        assertEquals("MPREb_box1", t.album?.id)
+        assertEquals("Anthology Box Set", t.album?.title)
+        assertEquals("Orchestra", t.artistDisplay)
+        assertEquals("https://example.com/box.jpg", t.thumbnailUrl)
+    }
 }

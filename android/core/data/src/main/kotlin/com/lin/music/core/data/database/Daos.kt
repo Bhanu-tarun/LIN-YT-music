@@ -192,6 +192,9 @@ interface CacheDao {
     @Query("DELETE FROM stream_cache WHERE videoId = :videoId")
     suspend fun invalidateStream(videoId: String)
 
+    @Query("DELETE FROM stream_cache")
+    suspend fun clearAllStreamCache()
+
     @Query("SELECT * FROM lyrics_cache WHERE videoId = :videoId LIMIT 1")
     suspend fun getLyrics(videoId: String): LyricsCacheEntity?
 

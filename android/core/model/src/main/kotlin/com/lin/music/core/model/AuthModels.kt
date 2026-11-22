@@ -39,7 +39,8 @@ data class UserPreferences(
     val includeMusicVideos: Boolean = false,
     val playbackSpeed: Float = 1.0f,
     val playbackPitch: Float = 1.0f,
-    val showTrackThumbnails: Boolean = false
+    val showTrackThumbnails: Boolean = false,
+    val contentRegion: String = ContentRegions.DEFAULT_CODE
 )
 
 @Serializable

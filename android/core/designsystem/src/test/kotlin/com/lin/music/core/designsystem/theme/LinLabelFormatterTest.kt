@@ -10,6 +10,7 @@ class LinLabelFormatterTest {
         assertEquals("all albums", formatLinLabel("all albums", false))
         assertEquals("+ library", formatLinLabel("+ library", false))
         assertEquals("#chill · mix", formatLinLabel("#chill · mix", false))
+        assertEquals("LIN", formatLinLabel("LIN", false))
     }
 
     @Test
@@ -18,6 +19,8 @@ class LinLabelFormatterTest {
         assertEquals("+ Library", formatLinLabel("+ library", true))
         assertEquals("Download For Offline", formatLinLabel("download for offline", true))
         assertEquals("#ambient Mix", formatLinLabel("#ambient mix", true))
+        assertEquals("LIN", formatLinLabel("LIN", true))
+        assertEquals("Visuals · LIN", formatLinLabel("visuals · LIN", true))
         assertEquals("LIN · Home", formatLinLabel("LIN · home", true))
     }
 }

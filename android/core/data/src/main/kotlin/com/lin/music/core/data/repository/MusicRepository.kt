@@ -43,6 +43,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -67,6 +68,15 @@ class MusicRepository @Inject constructor(
     var lastFullSyncAtMs: Long = 0L
 
     val sessionFlow: Flow<AccountSession?> = authStore.sessionFlow
+
+    val contentRegionFlow: Flow<String> = preferencesStore.preferencesFlow
+        .map { it.contentRegion }
+        .distinctUntilChanged()
+
+    suspend fun onContentRegionChanged() {
+        innerTubeApi.clearVisitorDataCache()
+        cacheDao.clearAllStreamCache()
+    }
 
     fun observeLibraryTracks(): Flow<List<Track>> =
         combine(trackDao.observeLibraryTracks(), tagDao.observeAllTags()) { tracks, tags ->
@@ -268,37 +278,69 @@ class MusicRepository @Inject constructor(
     }
 
     suspend fun refreshLibrarySongs(): Result<List<Track>> = runCatching {
-        val (firstPage, cont) = innerTubeApi.getLibrarySongs()
-        val secondPage = if (!cont.isNullOrBlank()) {
-            runCatching { innerTubeApi.getLibrarySongs(cont).first }.getOrDefault(emptyList())
-        } else emptyList()
-        val all = (firstPage + secondPage).distinctBy { it.videoId }
+        val (firstPage, firstCont) = innerTubeApi.getLibrarySongs()
+        val accumulated = firstPage.toMutableList()
+        val seenTokens = mutableSetOf<String>()
+        var nextToken = firstCont
+        var pages = 1
+        while (!nextToken.isNullOrBlank() &&
+            accumulated.size < MAX_COLLECTION_TRACKS &&
+            pages < MAX_CONTINUATION_PAGES &&
+            seenTokens.add(nextToken)
+        ) {
+            val (nextTracks, followingToken) = runCatching { innerTubeApi.getLibrarySongs(nextToken) }
+                .getOrNull()
+                ?: break
+            if (nextTracks.isEmpty()) break
+            val remaining = MAX_COLLECTION_TRACKS - accumulated.size
+            accumulated += nextTracks.take(remaining)
+            pages++
+            nextToken = followingToken
+        }
+        val all = accumulated.distinctBy { it.videoId }.take(MAX_COLLECTION_TRACKS)
         mergeUpsertTracks(all, markInLibrary = true)
         all
     }
 
     suspend fun refreshLikedSongs(): Result<List<Track>> = runCatching {
-        val liked = innerTubeApi.getLikedSongs()
-        mergeUpsertTracks(liked.tracks, markLiked = true)
+        val firstLiked = innerTubeApi.getLikedSongs()
+        val accumulated = firstLiked.tracks.take(MAX_COLLECTION_TRACKS).toMutableList()
+        val seenTokens = mutableSetOf<String>()
+        var nextToken = firstLiked.continuation
+        var pages = 1
+        while (!nextToken.isNullOrBlank() &&
+            accumulated.size < MAX_COLLECTION_TRACKS &&
+            pages < MAX_CONTINUATION_PAGES &&
+            seenTokens.add(nextToken)
+        ) {
+            val nextPage = runCatching { innerTubeApi.getLikedSongs(nextToken) }.getOrNull() ?: break
+            if (nextPage.tracks.isEmpty()) break
+            val remaining = MAX_COLLECTION_TRACKS - accumulated.size
+            accumulated += nextPage.tracks.take(remaining)
+            pages++
+            nextToken = nextPage.continuation
+        }
+        val allLiked = accumulated.distinctBy { it.videoId }.take(MAX_COLLECTION_TRACKS)
+        mergeUpsertTracks(allLiked, markLiked = true)
         playlistDao.upsertPlaylists(
             listOf(
                 PlaylistEntity(
                     id = "LM",
                     browseId = "VLLM",
-                    title = liked.title,
-                    subtitle = "${liked.tracks.size} tracks",
-                    description = liked.description,
-                    thumbnailUrl = liked.thumbnailUrl,
-                    trackCount = liked.tracks.size,
+                    title = firstLiked.title,
+                    subtitle = "${allLiked.size} tracks",
+                    description = firstLiked.description,
+                    thumbnailUrl = firstLiked.thumbnailUrl,
+                    trackCount = allLiked.size,
                     isEditable = false
                 )
             )
         )
         playlistDao.clearPlaylistTracks("LM")
-        playlistDao.insertPlaylistTracks(liked.tracks.mapIndexed { idx, t ->
+        playlistDao.insertPlaylistTracks(allLiked.mapIndexed { idx, t ->
             PlaylistTrackCrossRef("LM", t.videoId, t.setVideoId, idx)
         })
-        liked.tracks
+        allLiked
     }
 
     suspend fun refreshHistory(): Result<List<Track>> = runCatching {
@@ -466,15 +508,15 @@ class MusicRepository @Inject constructor(
 
     suspend fun getHome(continuation: String? = null): HomePage = innerTubeApi.getHome(continuation)
 
-    suspend fun getAlbum(browseId: String): AlbumDetail {
+    suspend fun loadAlbumProgressive(
+        browseId: String,
+        onUpdate: (AlbumDetail, Boolean) -> Unit = { _, _ -> }
+    ): AlbumDetail {
         val cachedAlbum = albumArtistDao.getAlbum(browseId)
-        return runCatching {
-            val detail = innerTubeApi.getAlbum(browseId)
-            cacheAlbumForOffline(detail)
-            detail.copy(inLibrary = detail.inLibrary || (cachedAlbum?.inLibrary == true))
-        }.getOrElse { err ->
+        val firstRes = runCatching { innerTubeApi.getAlbum(browseId) }
+        val page1 = firstRes.getOrElse { err ->
             val cachedTracks = trackDao.getTracksByAlbumId(browseId).map { it.toModel() }
-            if (cachedAlbum != null && cachedTracks.isNotEmpty()) {
+            val fallback = if (cachedAlbum != null && cachedTracks.isNotEmpty()) {
                 val summary = cachedAlbum.toSummary()
                 AlbumDetail(
                     browseId = summary.browseId,
@@ -500,67 +542,204 @@ class MusicRepository @Inject constructor(
             } else {
                 throw err
             }
+            onUpdate(fallback, false)
+            return fallback
         }
+
+        val resolvedBase = page1.copy(inLibrary = page1.inLibrary || (cachedAlbum?.inLibrary == true))
+        val albumRef = AlbumRef(id = resolvedBase.browseId, title = resolvedBase.title)
+        val accumulated = page1.tracks.take(MAX_COLLECTION_TRACKS).toMutableList()
+        var nextToken = page1.continuation
+        val seenTokens = mutableSetOf<String>()
+        var pages = 1
+        val mayFallbackToPlaylist = accumulated.size >= 100 &&
+            nextToken.isNullOrBlank() &&
+            !resolvedBase.playlistId.isNullOrBlank()
+
+        onUpdate(
+            resolvedBase.copy(tracks = accumulated.toList(), continuation = nextToken),
+            (!nextToken.isNullOrBlank() || mayFallbackToPlaylist) && accumulated.size < MAX_COLLECTION_TRACKS
+        )
+
+        while (!nextToken.isNullOrBlank() &&
+            accumulated.size < MAX_COLLECTION_TRACKS &&
+            pages < MAX_CONTINUATION_PAGES &&
+            seenTokens.add(nextToken)
+        ) {
+            val nextPage = runCatching {
+                innerTubeApi.getAlbum(
+                    browseId = browseId,
+                    continuation = nextToken,
+                    fallbackAlbum = albumRef,
+                    fallbackArtists = resolvedBase.artists,
+                    fallbackThumb = resolvedBase.thumbnailUrl
+                )
+            }.getOrNull() ?: break
+            if (nextPage.tracks.isEmpty()) break
+            val remaining = MAX_COLLECTION_TRACKS - accumulated.size
+            accumulated += nextPage.tracks.take(remaining)
+            pages++
+            nextToken = nextPage.continuation?.takeIf { it.isNotBlank() }
+            onUpdate(
+                resolvedBase.copy(tracks = accumulated.toList(), continuation = nextToken),
+                !nextToken.isNullOrBlank() && accumulated.size < MAX_COLLECTION_TRACKS && pages < MAX_CONTINUATION_PAGES
+            )
+        }
+
+        // If an unusually large album returned 100 tracks on browse without a shelf continuation,
+        // try paginating its underlying OLAK playlistId cleanly up to MAX_COLLECTION_TRACKS.
+        if (accumulated.size == 100 && nextToken.isNullOrBlank() && !resolvedBase.playlistId.isNullOrBlank()) {
+            val olakId = resolvedBase.playlistId!!
+            val olakBrowse = if (olakId.startsWith("VL")) olakId else "VL$olakId"
+            val olakPage1 = runCatching { innerTubeApi.getPlaylist(olakBrowse, null) }.getOrNull()
+            if (olakPage1 != null) {
+                val olakTracks = olakPage1.tracks.take(MAX_COLLECTION_TRACKS).toMutableList()
+                var olakToken = olakPage1.continuation
+                val olakSeen = mutableSetOf<String>()
+                var olakPages = 1
+                while (!olakToken.isNullOrBlank() &&
+                    olakTracks.size < MAX_COLLECTION_TRACKS &&
+                    olakPages < MAX_CONTINUATION_PAGES &&
+                    olakSeen.add(olakToken)
+                ) {
+                    val nextOlak = runCatching { innerTubeApi.getPlaylist(olakBrowse, olakToken) }.getOrNull() ?: break
+                    if (nextOlak.tracks.isEmpty()) break
+                    val remaining = MAX_COLLECTION_TRACKS - olakTracks.size
+                    olakTracks += nextOlak.tracks.take(remaining)
+                    olakPages++
+                    olakToken = nextOlak.continuation?.takeIf { it.isNotBlank() }
+                }
+                if (olakTracks.size > accumulated.size) {
+                    accumulated.clear()
+                    accumulated += olakTracks.map { t ->
+                        t.copy(
+                            album = t.album ?: albumRef,
+                            artists = t.artists.ifEmpty { resolvedBase.artists },
+                            thumbnailUrl = t.thumbnailUrl ?: resolvedBase.thumbnailUrl
+                        )
+                    }
+                }
+            }
+        }
+
+        val finalDetail = resolvedBase.copy(
+            tracks = accumulated.toList(),
+            continuation = null
+        )
+        onUpdate(finalDetail, false)
+        cacheAlbumForOffline(finalDetail)
+        return finalDetail
     }
+
+    suspend fun getAlbum(browseId: String): AlbumDetail = loadAlbumProgressive(browseId)
 
     suspend fun getArtist(browseId: String): ArtistDetail = innerTubeApi.getArtist(browseId)
 
-    suspend fun getPlaylist(browseId: String, continuation: String? = null): PlaylistDetail {
-        if (continuation != null) {
-            return innerTubeApi.getPlaylist(browseId, continuation)
-        }
+    suspend fun loadPlaylistProgressive(
+        browseId: String,
+        onUpdate: (PlaylistDetail, Boolean) -> Unit = { _, _ -> }
+    ): PlaylistDetail {
         val normalizedId = browseId.removePrefix("VL")
         val existing = playlistDao.getPlaylist(normalizedId)
-        return runCatching {
-            val detail = innerTubeApi.getPlaylist(browseId, null)
-            val resolvedInLibrary = detail.inLibrary || (existing?.inLibrary == true) || detail.isEditable || detail.id == "LM"
-            val resolvedEditable = (detail.isEditable || (existing?.isEditable == true)) && detail.id != "LM"
-            val resolved = detail.copy(
-                isEditable = resolvedEditable,
-                inLibrary = resolvedInLibrary
-            )
-            if (resolvedInLibrary) {
-                playlistDao.upsertPlaylists(
-                    listOf(
-                        PlaylistEntity(
-                            id = resolved.id,
-                            browseId = resolved.browseId,
-                            title = resolved.title,
-                            subtitle = resolved.author,
-                            description = resolved.description,
-                            thumbnailUrl = resolved.thumbnailUrl,
-                            trackCount = resolved.tracks.size,
-                            isEditable = resolved.isEditable,
-                            inLibrary = true
-                        )
-                    )
-                )
-                mergeUpsertTracks(resolved.tracks)
-                playlistDao.clearPlaylistTracks(resolved.id)
-                playlistDao.insertPlaylistTracks(resolved.tracks.mapIndexed { idx, track ->
-                    PlaylistTrackCrossRef(resolved.id, track.videoId, track.setVideoId, idx)
-                })
-            }
-            resolved
-        }.getOrElse { err ->
+        val firstRes = runCatching { innerTubeApi.getPlaylist(browseId, null) }
+        val page1 = firstRes.getOrElse { err ->
             val cachedTracks = playlistDao.getPlaylistTracksSnapshot(normalizedId)
             if (existing != null && cachedTracks.isNotEmpty()) {
-                val crossRefs = playlistDao.getPlaylistCrossRefs(normalizedId).associate { it.videoId to it.setVideoId }
-                PlaylistDetail(
+                val crossRefs = playlistDao.getPlaylistCrossRefs(normalizedId)
+                val setIdByVideo = crossRefs.associate { it.videoId to it.setVideoId }
+                val cachedDetail = PlaylistDetail(
                     id = existing.id,
                     browseId = existing.browseId,
                     title = existing.title,
                     description = existing.description,
                     author = existing.subtitle,
                     thumbnailUrl = existing.thumbnailUrl,
-                    tracks = cachedTracks.map { it.toModel(setVideoId = crossRefs[it.videoId]) },
+                    tracks = cachedTracks.mapIndexed { idx, entity ->
+                        val refSetId = crossRefs.getOrNull(idx)
+                            ?.takeIf { it.videoId == entity.videoId }
+                            ?.setVideoId
+                            ?: setIdByVideo[entity.videoId]
+                        entity.toModel(setVideoId = refSetId)
+                    },
                     isEditable = existing.isEditable,
                     inLibrary = existing.inLibrary
                 )
-            } else {
-                throw err
+                onUpdate(cachedDetail, false)
+                return cachedDetail
             }
+            throw err
         }
+
+        val resolvedInLibrary = page1.inLibrary || (existing?.inLibrary == true) || page1.isEditable || page1.id == "LM"
+        val resolvedEditable = (page1.isEditable || (existing?.isEditable == true)) && page1.id != "LM"
+        val baseResolved = page1.copy(
+            isEditable = resolvedEditable,
+            inLibrary = resolvedInLibrary
+        )
+
+        val accumulated = page1.tracks.take(MAX_COLLECTION_TRACKS).toMutableList()
+        var nextToken = page1.continuation
+        val seenTokens = mutableSetOf<String>()
+        var pages = 1
+
+        onUpdate(
+            baseResolved.copy(tracks = accumulated.toList(), continuation = nextToken),
+            !nextToken.isNullOrBlank() && accumulated.size < MAX_COLLECTION_TRACKS
+        )
+
+        while (!nextToken.isNullOrBlank() &&
+            accumulated.size < MAX_COLLECTION_TRACKS &&
+            pages < MAX_CONTINUATION_PAGES &&
+            seenTokens.add(nextToken)
+        ) {
+            val nextPage = runCatching { innerTubeApi.getPlaylist(browseId, nextToken) }.getOrNull() ?: break
+            if (nextPage.tracks.isEmpty()) break
+            val remaining = MAX_COLLECTION_TRACKS - accumulated.size
+            accumulated += nextPage.tracks.take(remaining)
+            pages++
+            nextToken = nextPage.continuation?.takeIf { it.isNotBlank() }
+            onUpdate(
+                baseResolved.copy(tracks = accumulated.toList(), continuation = nextToken),
+                !nextToken.isNullOrBlank() && accumulated.size < MAX_COLLECTION_TRACKS && pages < MAX_CONTINUATION_PAGES
+            )
+        }
+
+        val finalDetail = baseResolved.copy(
+            tracks = accumulated.toList(),
+            continuation = null
+        )
+        onUpdate(finalDetail, false)
+
+        if (resolvedInLibrary) {
+            playlistDao.upsertPlaylists(
+                listOf(
+                    PlaylistEntity(
+                        id = finalDetail.id,
+                        browseId = finalDetail.browseId,
+                        title = finalDetail.title,
+                        subtitle = finalDetail.author,
+                        description = finalDetail.description,
+                        thumbnailUrl = finalDetail.thumbnailUrl,
+                        trackCount = finalDetail.tracks.size,
+                        isEditable = finalDetail.isEditable,
+                        inLibrary = true
+                    )
+                )
+            )
+            mergeUpsertTracks(finalDetail.tracks)
+            playlistDao.clearPlaylistTracks(finalDetail.id)
+            playlistDao.insertPlaylistTracks(finalDetail.tracks.mapIndexed { idx, track ->
+                PlaylistTrackCrossRef(finalDetail.id, track.videoId, track.setVideoId, idx)
+            })
+        }
+        return finalDetail
+    }
+
+    suspend fun getPlaylist(browseId: String, continuation: String? = null): PlaylistDetail {
+        if (continuation != null) {
+            return innerTubeApi.getPlaylist(browseId, continuation)
+        }
+        return loadPlaylistProgressive(browseId)
     }
 
     suspend fun togglePlaylistLibrary(playlist: PlaylistDetail): Result<Boolean> = runCatching {
@@ -786,7 +965,7 @@ class MusicRepository @Inject constructor(
             setVideoId = refs.firstOrNull { it.videoId == track.videoId }?.setVideoId
         }
         if (setVideoId.isNullOrBlank()) {
-            val fresh = innerTubeApi.getPlaylist("VL$normalizedId")
+            val fresh = getPlaylist("VL$normalizedId")
             setVideoId = fresh.tracks.firstOrNull { it.videoId == track.videoId }?.setVideoId
         }
         val finalSetId = setVideoId
@@ -884,5 +1063,10 @@ class MusicRepository @Inject constructor(
         val payload = json.decodeFromString<LinBackupPayload>(rawJson)
         preferencesStore.update { payload.preferences }
         tagDao.insertTags(payload.itemTags.map { ItemTagEntity(it.itemId, it.itemType, it.tag) })
+    }
+
+    companion object {
+        const val MAX_COLLECTION_TRACKS = 5_000
+        const val MAX_CONTINUATION_PAGES = 60
     }
 }

@@ -51,6 +51,7 @@ import coil3.request.ImageRequest
 import coil3.size.Precision
 import coil3.size.Size
 import com.lin.music.core.designsystem.components.LinInvertedButton
+import com.lin.music.core.designsystem.components.LinLazyColumnScrollbar
 import com.lin.music.core.designsystem.components.LinOutlinedButton
 import com.lin.music.core.designsystem.components.LinTagPill
 import com.lin.music.core.designsystem.components.LinTrackArtHoverOverlay
@@ -63,6 +64,7 @@ import com.lin.music.core.designsystem.sheets.PlaylistEditorDialog
 import com.lin.music.core.designsystem.theme.LinSharpShape
 import com.lin.music.core.designsystem.theme.LinTextStyles
 import com.lin.music.core.designsystem.theme.LinTheme
+import com.lin.music.core.designsystem.theme.linBrandText
 import com.lin.music.core.designsystem.theme.linLabel
 import com.lin.music.core.model.AlbumDetail
 import com.lin.music.core.model.ArtistDetail
@@ -77,6 +79,7 @@ import com.lin.music.util.ShareHelper
 fun AlbumDetailScreen(
     album: AlbumDetail?,
     isLoading: Boolean,
+    isLoadingMore: Boolean = false,
     error: String?,
     currentVideoId: String?,
     accentColor: Color,
@@ -215,7 +218,12 @@ fun AlbumDetailScreen(
                             Spacer(Modifier.height(6.dp))
                             val firstArtistId = data.artists.firstOrNull { !it.id.isNullOrBlank() }?.id
                             Text(
-                                text = listOfNotNull(data.artistDisplay.takeIf { it.isNotBlank() }, data.year, "${data.tracks.size} tracks").joinToString(" · "),
+                                text = listOfNotNull(
+                                    data.artistDisplay.takeIf { it.isNotBlank() },
+                                    data.year,
+                                    "${data.tracks.size} tracks",
+                                    if (isLoadingMore) linLabel("loading more...") else null
+                                ).joinToString(" · "),
                                 style = LinTextStyles.subtitle,
                                 color = linColors.textSecondary,
                                 modifier = if (firstArtistId != null) Modifier.clickable { onGoToArtist(firstArtistId) } else Modifier
@@ -290,6 +298,17 @@ fun AlbumDetailScreen(
                     }
                 )
             }
+
+            if (isLoadingMore) {
+                item {
+                    Text(
+                        text = linLabel("loading more tracks..."),
+                        style = LinTextStyles.subtitle,
+                        color = linColors.textSecondary,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                }
+            }
         }
 
         // Hover art renders IN FRONT of track rows cleanly (no pointer consumption)
@@ -297,6 +316,18 @@ fun AlbumDetailScreen(
             imageUrl = if (previewedKey != null) previewArtUrl else null,
             centerYPx = previewCenterYPx,
             viewportHeightPx = viewportHeightPx
+        )
+
+        LinLazyColumnScrollbar(
+            listState = listState,
+            accentColor = accentColor,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            bottomPadding = 172.dp,
+            labelProvider = { idx ->
+                if (visibleAlbumTracks.isNotEmpty()) {
+                    "${(idx - 2).coerceIn(0, visibleAlbumTracks.lastIndex) + 1} / ${visibleAlbumTracks.size}"
+                } else null
+            }
         )
     }
 }
@@ -306,6 +337,7 @@ fun AlbumDetailScreen(
 fun PlaylistDetailScreen(
     playlist: PlaylistDetail?,
     isLoading: Boolean,
+    isLoadingMore: Boolean = false,
     error: String?,
     currentVideoId: String?,
     accentColor: Color,
@@ -482,10 +514,18 @@ fun PlaylistDetailScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(data.title, style = LinTextStyles.drilldownTitle, color = linColors.textPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Spacer(Modifier.height(4.dp))
+                            val authorTracks = listOfNotNull(
+                                data.author,
+                                "${data.tracks.size} tracks",
+                                if (isLoadingMore) linLabel("loading more...") else null
+                            ).joinToString(" · ")
                             Text(
-                                text = listOfNotNull(data.author, "${data.tracks.size} tracks").joinToString(" · "),
-                                style = LinTextStyles.subtitle,
-                                color = linColors.textSecondary
+                                text = linBrandText(
+                                    text = authorTracks,
+                                    accentColor = accentColor,
+                                    baseColor = linColors.textSecondary
+                                ),
+                                style = LinTextStyles.subtitle
                             )
                         }
                     }
@@ -629,6 +669,17 @@ fun PlaylistDetailScreen(
                     )
                 }
             }
+
+            if (isLoadingMore) {
+                item {
+                    Text(
+                        text = linLabel("loading more tracks..."),
+                        style = LinTextStyles.subtitle,
+                        color = linColors.textSecondary,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                }
+            }
         }
 
         // Hover art renders IN FRONT of track rows cleanly (no pointer consumption)
@@ -636,6 +687,18 @@ fun PlaylistDetailScreen(
             imageUrl = if (previewedKey != null) previewArtUrl else null,
             centerYPx = previewCenterYPx,
             viewportHeightPx = viewportHeightPx
+        )
+
+        LinLazyColumnScrollbar(
+            listState = listState,
+            accentColor = accentColor,
+            modifier = Modifier.align(Alignment.CenterEnd),
+            bottomPadding = 172.dp,
+            labelProvider = { idx ->
+                if (processed.isNotEmpty()) {
+                    "${(idx - 2).coerceIn(0, processed.lastIndex) + 1} / ${processed.size}"
+                } else null
+            }
         )
     }
 

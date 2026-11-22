@@ -24,12 +24,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.lin.music.core.designsystem.components.LinInvertedButton
 import com.lin.music.core.designsystem.components.LinOutlinedButton
+import com.lin.music.core.designsystem.theme.APP_BRAND_NAME
 import com.lin.music.core.designsystem.theme.LinTextStyles
 import com.lin.music.core.designsystem.theme.LinTheme
+import com.lin.music.core.designsystem.theme.linBrandText
 import com.lin.music.core.innertube.auth.SapisidAuthSigner
 import com.lin.music.core.model.AccountSession
 import org.json.JSONObject
@@ -41,6 +44,7 @@ private const val YTM_HOME_URL = "https://music.youtube.com"
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun YtmLoginScreen(
+    accentColor: Color,
     onLoggedIn: (AccountSession) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -115,7 +119,7 @@ fun YtmLoginScreen(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
-                Text("LIN", style = LinTextStyles.brand, color = linColors.textPrimary)
+                Text(APP_BRAND_NAME, style = LinTextStyles.brand, color = accentColor)
                 Text(
                     text = "youtube music,\nwithout the noise.",
                     style = LinTextStyles.drilldownTitle,
@@ -151,7 +155,10 @@ fun YtmLoginScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("LIN · SIGN IN", style = LinTextStyles.brand, color = linColors.textPrimary)
+                Text(
+                    text = linBrandText("$APP_BRAND_NAME · SIGN IN", accentColor, linColors.textPrimary),
+                    style = LinTextStyles.brand
+                )
                 Text("sign in, then tap done if not redirected", style = LinTextStyles.subtitle, color = linColors.textSecondary)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -3,6 +3,7 @@ package com.lin.music.core.innertube.stream
 import com.lin.music.core.innertube.InnerTubeApi
 import com.lin.music.core.innertube.client.YouTubeClient
 import com.lin.music.core.model.AudioQuality
+import com.lin.music.core.model.ContentRegions
 import com.lin.music.core.model.SkipSegment
 import com.lin.music.core.model.StreamInfo
 import kotlinx.coroutines.CompletableDeferred
@@ -27,6 +28,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.localization.ContentCountry
+import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.stream.AudioStream
 import org.schabi.newpipe.extractor.stream.DeliveryMethod
 import org.schabi.newpipe.extractor.stream.StreamInfo as NpStreamInfo
@@ -45,6 +48,8 @@ class StreamResolver @Inject constructor(
     private val inFlight = ConcurrentHashMap<Pair<String, AudioQuality>, CompletableDeferred<StreamInfo>>()
     @Volatile
     private var newPipeInitialized = false
+    @Volatile
+    private var newPipeRegionCode: String? = null
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -55,12 +60,19 @@ class StreamResolver @Inject constructor(
             .build()
     }
 
-    private suspend fun ensureNewPipeInitialized() {
-        if (newPipeInitialized) return
+    private suspend fun ensureNewPipeInitialized(regionCode: String) {
+        val normalized = ContentRegions.normalize(regionCode)
+        if (newPipeInitialized && newPipeRegionCode == normalized) return
         initMutex.withLock {
+            val localization = Localization("en", normalized)
+            val country = ContentCountry(normalized)
             if (!newPipeInitialized) {
-                NewPipe.init(NewPipeDownloaderImpl(okHttpClient))
+                NewPipe.init(NewPipeDownloaderImpl(okHttpClient), localization, country)
                 newPipeInitialized = true
+                newPipeRegionCode = normalized
+            } else if (newPipeRegionCode != normalized) {
+                NewPipe.setupLocalization(localization, country)
+                newPipeRegionCode = normalized
             }
         }
     }
@@ -148,7 +160,7 @@ class StreamResolver @Inject constructor(
 
         // 2. Secondary: NewPipeExtractor v0.27.0 (fast-path without duplicate 16KB pre-probe)
         val npAttempt = runCatching {
-            ensureNewPipeInitialized()
+            ensureNewPipeInitialized(innerTubeApi.currentRegionCode())
             val npInfo = NpStreamInfo.getInfo(
                 ServiceList.YouTube,
                 "https://www.youtube.com/watch?v=$videoId"

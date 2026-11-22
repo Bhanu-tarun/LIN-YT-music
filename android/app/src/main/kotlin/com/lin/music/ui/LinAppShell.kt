@@ -66,7 +66,7 @@ import com.lin.music.core.designsystem.sheets.ArtistPickerSheet
 import com.lin.music.core.designsystem.sheets.SleepTimerSheet
 import com.lin.music.core.designsystem.sheets.TagEditorSheet
 import com.lin.music.core.designsystem.sheets.TrackActionSheet
-import com.lin.music.core.designsystem.theme.LinBrandOrange
+import com.lin.music.core.designsystem.theme.APP_BRAND_NAME
 import com.lin.music.core.designsystem.theme.LinSharpShape
 import com.lin.music.core.designsystem.theme.LinTextStyles
 import com.lin.music.core.designsystem.theme.LinTheme
@@ -159,7 +159,10 @@ fun LinAppShell(
 
             // Gate behind YouTube Music login only once DataStore session check finishes
             if (sessionInitialized && (session == null || !session!!.isValid)) {
-                YtmLoginScreen(onLoggedIn = mainViewModel::onWebViewLoggedIn)
+                YtmLoginScreen(
+                    accentColor = accentColor,
+                    onLoggedIn = mainViewModel::onWebViewLoggedIn
+                )
             } else if (sessionInitialized) {
                 BackHandler(enabled = isPlayerExpanded || isSearchOpen || detailStack.isNotEmpty()) {
                     when {
@@ -203,7 +206,7 @@ fun LinAppShell(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("LIN", style = LinTextStyles.brand, color = linColors.textPrimary)
+                            Text(APP_BRAND_NAME, style = LinTextStyles.brand, color = accentColor)
                             Spacer(Modifier.width(10.dp))
                             Box(
                                 modifier = Modifier
@@ -295,11 +298,13 @@ fun LinAppShell(
                                     LaunchedEffect(target.browseId) { detailVm.loadAlbum(target.browseId) }
                                     val albumData by detailVm.album.collectAsStateWithLifecycle()
                                     val loading by detailVm.isLoading.collectAsStateWithLifecycle()
+                                    val loadingMore by detailVm.isLoadingMore.collectAsStateWithLifecycle()
                                     val err by detailVm.error.collectAsStateWithLifecycle()
                                     val albumPinItem = albumData?.let { HomeItem.AlbumItem(it.toSummary()) }
                                     AlbumDetailScreen(
                                         album = albumData,
                                         isLoading = loading,
+                                        isLoadingMore = loadingMore,
                                         error = err,
                                         currentVideoId = currentVideoId,
                                         accentColor = accentColor,
@@ -330,12 +335,14 @@ fun LinAppShell(
                                     LaunchedEffect(target.browseId) { detailVm.loadPlaylist(target.browseId) }
                                     val plData by detailVm.playlist.collectAsStateWithLifecycle()
                                     val loading by detailVm.isLoading.collectAsStateWithLifecycle()
+                                    val loadingMore by detailVm.isLoadingMore.collectAsStateWithLifecycle()
                                     val err by detailVm.error.collectAsStateWithLifecycle()
                                     val libraryTracks by libraryViewModel.libraryTracks.collectAsStateWithLifecycle()
                                     val plPinItem = plData?.let { HomeItem.PlaylistItem(it.toSummary()) }
                                     PlaylistDetailScreen(
                                         playlist = plData,
                                         isLoading = loading,
+                                        isLoadingMore = loadingMore,
                                         error = err,
                                         currentVideoId = currentVideoId,
                                         accentColor = accentColor,
@@ -479,12 +486,14 @@ fun LinAppShell(
                                     SettingsScreen(
                                         session = session,
                                         preferences = preferences,
+                                        accentColor = accentColor,
                                         audioSessionId = audioSessionId,
                                         downloadedCount = downloadedTracks.size,
                                         cacheSizeBytes = cacheSizeBytes,
                                         onBack = { mainViewModel.popDetail() },
                                         onSyncNow = { mainViewModel.syncAccount(force = true) },
                                         onLogout = { mainViewModel.logout() },
+                                        onSetContentRegion = settingsViewModel::setContentRegion,
                                         onSetDarkTheme = settingsViewModel::setDarkTheme,
                                         onSetCapitalizeLabels = settingsViewModel::setCapitalizeLabels,
                                         onSetAmbientMode = settingsViewModel::setAmbientMode,
@@ -582,6 +591,7 @@ fun LinAppShell(
                                 MainTab.Playlists -> PlaylistsScreen(
                                     playlists = playlists,
                                     activeTagFilter = activeTagFilter,
+                                    accentColor = accentColor,
                                     onTagClick = mainViewModel::setActiveTagFilter,
                                     onPlaylistClick = { id -> mainViewModel.openDetail(DetailRoute.Playlist(id)) },
                                     onSwipeRightPlayNext = mainViewModel::playPlaylistNext,
@@ -875,14 +885,14 @@ fun LinAppShell(
                 exit = fadeOut(tween(340, easing = FastOutSlowInEasing)) +
                     scaleOut(tween(340, easing = FastOutSlowInEasing), targetScale = 1.04f)
             ) {
-                LinLaunchOverlay()
+                LinLaunchOverlay(accentColor = accentColor)
             }
         }
     }
 }
 
 @Composable
-private fun LinLaunchOverlay() {
+private fun LinLaunchOverlay(accentColor: Color) {
     val linColors = LinTheme.colors
     val infiniteTransition = rememberInfiniteTransition(label = "linLaunchBar")
     val sweepFraction by infiniteTransition.animateFloat(
@@ -892,7 +902,7 @@ private fun LinLaunchOverlay() {
             animation = tween(durationMillis = 950, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Restart
         ),
-        label = "orangeBarSweep"
+        label = "accentBarSweep"
     )
 
     Box(
@@ -910,9 +920,9 @@ private fun LinLaunchOverlay() {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                text = "LIN",
+                text = APP_BRAND_NAME,
                 style = LinTextStyles.brand.copy(fontSize = 24.sp, letterSpacing = 5.sp),
-                color = linColors.textPrimary
+                color = accentColor
             )
             Spacer(Modifier.height(14.dp))
             BoxWithConstraints(
@@ -928,7 +938,7 @@ private fun LinLaunchOverlay() {
                         .offset(x = maxWidth * sweepFraction)
                         .width(indicatorWidth)
                         .fillMaxHeight()
-                        .background(LinBrandOrange)
+                        .background(accentColor)
                 )
             }
         }

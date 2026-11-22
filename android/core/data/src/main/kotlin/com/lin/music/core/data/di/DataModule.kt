@@ -11,6 +11,8 @@ import com.lin.music.core.data.database.PlaylistDao
 import com.lin.music.core.data.database.TagDao
 import com.lin.music.core.data.database.TrackDao
 import com.lin.music.core.data.datastore.AuthStore
+import com.lin.music.core.data.datastore.PreferencesStore
+import com.lin.music.core.innertube.RegionProvider
 import com.lin.music.core.innertube.SessionProvider
 import dagger.Binds
 import dagger.Module
@@ -30,6 +32,10 @@ abstract class DataBindModule {
     @Binds
     @Singleton
     abstract fun bindSessionProvider(authStore: AuthStore): SessionProvider
+
+    @Binds
+    @Singleton
+    abstract fun bindRegionProvider(preferencesStore: PreferencesStore): RegionProvider
 }
 
 @Module

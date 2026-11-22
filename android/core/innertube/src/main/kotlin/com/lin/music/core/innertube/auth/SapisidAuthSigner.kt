@@ -1,6 +1,7 @@
 package com.lin.music.core.innertube.auth
 
 import com.lin.music.core.model.AccountSession
+import com.lin.music.core.model.ContentRegions
 import java.security.MessageDigest
 
 object SapisidAuthSigner {
@@ -73,14 +74,16 @@ object SapisidAuthSigner {
     fun buildSessionHeaders(
         session: AccountSession?,
         origin: String = YTM_ORIGIN,
-        timestampSeconds: Long = System.currentTimeMillis() / 1000L
+        timestampSeconds: Long = System.currentTimeMillis() / 1000L,
+        regionCode: String = ContentRegions.DEFAULT_CODE
     ): Map<String, String> {
+        val gl = ContentRegions.normalize(regionCode)
         val headers = linkedMapOf(
             "Origin" to origin,
             "Referer" to "$origin/",
             "X-Origin" to origin,
             "X-Goog-AuthUser" to "0",
-            "Accept-Language" to "en-US,en;q=0.9"
+            "Accept-Language" to "en-$gl,en;q=0.9"
         )
         if (session == null) return headers
 

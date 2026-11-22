@@ -193,12 +193,13 @@ object InnerTubeParsers {
     }
 
     fun parseTracksFromBrowseShelf(root: JsonObject): Pair<List<Track>, String?> {
+        val container = root.extractTrackShelfContainer() ?: root
         val tracks = mutableListOf<Track>()
-        val items = root.findAllObjects("musicResponsiveListItemRenderer")
+        val items = container.findAllObjects("musicResponsiveListItemRenderer")
         for (item in items) {
             parseTrackFromListItem(item)?.let { tracks += it }
         }
-        return tracks to root.extractContinuationToken()
+        return tracks to container.extractShelfContinuationToken()
     }
 
     fun parseLibraryPlaylists(root: JsonObject): List<PlaylistSummary> {
@@ -325,11 +326,17 @@ object InnerTubeParsers {
         }
     }
 
-    fun parseAlbumResponse(root: JsonObject, browseId: String): AlbumDetail {
+    fun parseAlbumResponse(
+        root: JsonObject,
+        browseId: String,
+        fallbackAlbum: AlbumRef? = null,
+        fallbackArtists: List<ArtistRef> = emptyList(),
+        fallbackThumb: String? = null
+    ): AlbumDetail {
         val header = root.findFirstObject("musicResponsiveHeaderRenderer")
             ?: root.findFirstObject("musicDetailHeaderRenderer")
 
-        val title = header?.obj("title")?.extractText() ?: "Album"
+        val title = header?.obj("title")?.extractText() ?: fallbackAlbum?.title ?: "Album"
         val description = header?.obj("description")
             ?.obj("musicDescriptionShelfRenderer")
             ?.obj("description")
@@ -338,7 +345,7 @@ object InnerTubeParsers {
 
         val subtitleRuns = header?.obj("subtitle")?.arr("runs")
         val straplineRuns = header?.obj("straplineTextOne")?.arr("runs")
-        val artists = (straplineRuns ?: subtitleRuns).extractArtistsFromRuns()
+        val artists = (straplineRuns ?: subtitleRuns).extractArtistsFromRuns().ifEmpty { fallbackArtists }
         val year = subtitleRuns?.firstOrNull { elem ->
             val t = elem.asObj()?.str("text")?.trim().orEmpty()
             t.length == 4 && t.all(Char::isDigit)
@@ -356,6 +363,7 @@ object InnerTubeParsers {
                 ?.obj("croppedSquareThumbnailRenderer")
                 ?.obj("thumbnail")
                 ?.extractThumbnailUrl()
+            ?: fallbackThumb
 
         val playlistId = header?.findAllObjects("watchEndpoint")?.firstNotNullOfOrNull { it.str("playlistId") }
             ?: root.findAllObjects("watchPlaylistEndpoint").firstNotNullOfOrNull { it.str("playlistId") }
@@ -366,8 +374,9 @@ object InnerTubeParsers {
                 icon.contains("LIBRARY") || icon.contains("BOOKMARK")
             }?.bool("isToggled") ?: false
 
-        val albumRef = AlbumRef(id = browseId, title = title)
-        val rawTracks = root.findAllObjects("musicResponsiveListItemRenderer")
+        val albumRef = fallbackAlbum ?: AlbumRef(id = browseId, title = title)
+        val container = root.extractTrackShelfContainer() ?: root
+        val rawTracks = container.findAllObjects("musicResponsiveListItemRenderer")
             .mapNotNull { parseTrackFromListItem(it, fallbackAlbum = albumRef, fallbackArtists = artists, fallbackThumb = thumbnailUrl) }
 
         return AlbumDetail(
@@ -380,6 +389,7 @@ object InnerTubeParsers {
             isEpOrSingle = isEp,
             thumbnailUrl = thumbnailUrl,
             tracks = rawTracks,
+            continuation = container.extractShelfContinuationToken(),
             inLibrary = inLibrary
         )
     }
@@ -409,7 +419,8 @@ object InnerTubeParsers {
                 ?.obj("thumbnail")
                 ?.extractThumbnailUrl()
 
-        val tracks = root.findAllObjects("musicResponsiveListItemRenderer")
+        val container = root.extractTrackShelfContainer() ?: root
+        val tracks = container.findAllObjects("musicResponsiveListItemRenderer")
             .mapNotNull { parseTrackFromListItem(it) }
 
         val isLikedSongs = browseId == "LM" || browseId == "VLLM"
@@ -448,7 +459,7 @@ object InnerTubeParsers {
             author = author,
             thumbnailUrl = thumbnailUrl,
             tracks = tracks,
-            continuation = root.extractContinuationToken(),
+            continuation = container.extractShelfContinuationToken(),
             isEditable = isEditable,
             inLibrary = inLibrary,
             radioEndpointPlaylistId = radioId,
@@ -1116,6 +1127,19 @@ object InnerTubeParsers {
             }
             else -> normalized
         }
+    }
+
+    private fun JsonObject.extractTrackShelfContainer(): JsonObject? {
+        return findFirstObject("appendContinuationItemsAction")
+            ?: findFirstObject("musicPlaylistShelfContinuation")
+            ?: findFirstObject("musicShelfContinuation")
+            ?: findFirstObject("musicPlaylistShelfRenderer")
+            ?: findFirstObject("musicShelfRenderer")
+    }
+
+    private fun JsonObject.extractShelfContinuationToken(): String? {
+        return findFirstObject("continuationCommand")?.str("token")
+            ?: findFirstObject("nextContinuationData")?.str("continuation")
     }
 
     private fun JsonObject.extractContinuationToken(): String? {
