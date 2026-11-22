@@ -51,7 +51,7 @@ object DataModule {
         }
         return OkHttpClient.Builder()
             .dispatcher(dispatcher)
-            .connectionPool(ConnectionPool(8, 2, TimeUnit.MINUTES))
+            .connectionPool(ConnectionPool(12, 2, TimeUnit.MINUTES))
             .retryOnConnectionFailure(true)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)

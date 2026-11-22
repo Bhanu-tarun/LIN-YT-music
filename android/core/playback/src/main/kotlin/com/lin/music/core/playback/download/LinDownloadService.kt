@@ -24,9 +24,11 @@ import com.lin.music.core.data.database.CacheDao
 import com.lin.music.core.data.database.DownloadEntity
 import com.lin.music.core.data.database.TrackDao
 import com.lin.music.core.data.database.toEntity
+import com.lin.music.core.innertube.stream.StreamResolver
 import com.lin.music.core.model.Track
 import com.lin.music.core.playback.R
 import com.lin.music.core.playback.di.PlaybackModule
+import com.lin.music.core.playback.queue.PlaybackStateHub
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -49,6 +51,8 @@ class LinDownloadService : DownloadService(
     @Inject lateinit var injectedDownloadManager: DownloadManager
     @Inject lateinit var cacheDao: CacheDao
     @Inject lateinit var batchTracker: DownloadBatchTracker
+    @Inject lateinit var streamResolver: StreamResolver
+    @Inject lateinit var stateHub: PlaybackStateHub
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -63,6 +67,17 @@ class LinDownloadService : DownloadService(
                 Download.STATE_FAILED -> batchTracker.markFailed(download.request.id)
                 Download.STATE_REMOVING -> batchTracker.markRemoved(download.request.id)
                 else -> Unit
+            }
+            if (download.state == Download.STATE_COMPLETED || download.state == Download.STATE_FAILED) {
+                val nextQueuedIds = downloadManager.currentDownloads
+                    .asSequence()
+                    .filter { it.state == Download.STATE_QUEUED }
+                    .map { it.request.id }
+                    .take(LOOKAHEAD_PREFETCH_COUNT)
+                    .toList()
+                if (nextQueuedIds.isNotEmpty()) {
+                    streamResolver.prefetchForDownload(nextQueuedIds, stateHub.downloadQuality)
+                }
             }
             val mappedState = when (download.state) {
                 Download.STATE_COMPLETED -> 2
@@ -212,6 +227,7 @@ class LinDownloadService : DownloadService(
         const val NOTIFICATION_ID = 4042
         const val JOB_ID = 4043
         const val SUMMARY_NOTIFICATION_ID = 4044
+        const val LOOKAHEAD_PREFETCH_COUNT = 6
     }
 }
 
@@ -222,7 +238,9 @@ class DownloadController @Inject constructor(
     private val trackDao: TrackDao,
     private val cacheDao: CacheDao,
     private val downloadManager: DownloadManager,
-    private val batchTracker: DownloadBatchTracker
+    private val batchTracker: DownloadBatchTracker,
+    private val streamResolver: StreamResolver,
+    private val stateHub: PlaybackStateHub
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -299,6 +317,10 @@ class DownloadController @Inject constructor(
             // Register the whole batch before submitting requests so the notification starts at 0 / N.
             batchTracker.registerPending(pendingIds)
             NotificationManagerCompat.from(context).cancel(LinDownloadService.SUMMARY_NOTIFICATION_ID)
+            streamResolver.prefetchForDownload(
+                pendingIds.take(LinDownloadService.LOOKAHEAD_PREFETCH_COUNT),
+                stateHub.downloadQuality
+            )
 
             for (videoId in pendingIds) {
                 val req = DownloadRequest.Builder(

@@ -23,6 +23,7 @@ import com.lin.music.core.data.database.CacheDao
 import com.lin.music.core.data.database.toEntity
 import com.lin.music.core.innertube.stream.StreamResolver
 import com.lin.music.core.model.AudioQuality
+import com.lin.music.core.playback.download.ChunkedRangeDataSource
 import com.lin.music.core.playback.queue.PlaybackStateHub
 import dagger.Module
 import dagger.Provides
@@ -64,6 +65,7 @@ object PlaybackModule {
 
     const val STREAM_URI_PREFIX = "lin://stream/"
     private const val STREAM_CACHE_MAX_BYTES = 256L * 1024L * 1024L
+    private const val DOWNLOAD_MAX_PARALLEL = 4
 
     fun streamCacheKey(videoId: String, quality: AudioQuality): String =
         "$videoId:${quality.name}"
@@ -145,10 +147,20 @@ object PlaybackModule {
         qualityProvider: () -> AudioQuality,
         allowStreamUrlCache: Boolean,
         notifyCurrentStream: Boolean,
-        streamCacheToGuard: Cache? = null
+        streamCacheToGuard: Cache? = null,
+        chunkSizeBytes: Long? = null
     ): DataSource.Factory {
         // Do NOT hardcode a fixed User-Agent here; each stream sets its matching client UA on DataSpec.
-        val upstreamHttp = OkHttpDataSource.Factory(okHttpClient)
+        val baseHttpFactory: DataSource.Factory = OkHttpDataSource.Factory(okHttpClient)
+        val upstreamHttp: DataSource.Factory = if (chunkSizeBytes != null) {
+            ChunkedRangeDataSource.Factory(
+                upstreamFactory = baseHttpFactory,
+                chunkSizeBytes = chunkSizeBytes,
+                onExpiredOrForbidden = { videoId -> streamResolver.invalidateStream(videoId) }
+            )
+        } else {
+            baseHttpFactory
+        }
 
         return ResolvingDataSource.Factory(upstreamHttp) { dataSpec ->
             val videoId = extractVideoId(dataSpec) ?: return@Factory dataSpec
@@ -290,11 +302,12 @@ object PlaybackModule {
             stateHub = stateHub,
             qualityProvider = { stateHub.downloadQuality },
             allowStreamUrlCache = false,
-            notifyCurrentStream = false
+            notifyCurrentStream = false,
+            chunkSizeBytes = ChunkedRangeDataSource.DEFAULT_CHUNK_SIZE_BYTES
         )
         val executor = ThreadPoolExecutor(
-            2,
-            2,
+            DOWNLOAD_MAX_PARALLEL,
+            DOWNLOAD_MAX_PARALLEL,
             30L,
             TimeUnit.SECONDS,
             LinkedBlockingQueue()
@@ -306,7 +319,7 @@ object PlaybackModule {
             resolvingFactory,
             executor
         ).apply {
-            maxParallelDownloads = 2
+            maxParallelDownloads = DOWNLOAD_MAX_PARALLEL
         }
     }
 }

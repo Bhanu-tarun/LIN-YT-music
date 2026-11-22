@@ -12,7 +12,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -35,17 +37,73 @@ import org.schabi.newpipe.extractor.stream.DeliveryMethod
 import org.schabi.newpipe.extractor.stream.StreamInfo as NpStreamInfo
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
+
+internal class VisionOsCooldownTracker(
+    private val failureThreshold: Int = 3,
+    private val cooldownMs: Long = 10L * 60_000L
+) {
+    private var trackedRegion: String? = null
+    private var consecutiveFailures = 0
+    private var skipUntilMs = 0L
+
+    @Synchronized
+    fun shouldSkipVisionOs(regionCode: String, nowMs: Long): Boolean {
+        if (trackedRegion != regionCode) {
+            resetLocked(regionCode)
+            return false
+        }
+        return nowMs < skipUntilMs
+    }
+
+    @Synchronized
+    fun recordVisionOsSuccess(regionCode: String) {
+        resetLocked(regionCode)
+    }
+
+    @Synchronized
+    fun recordVisionOsFailureWithFallbackSuccess(regionCode: String, nowMs: Long) {
+        if (trackedRegion != regionCode) {
+            resetLocked(regionCode)
+        }
+        consecutiveFailures++
+        if (consecutiveFailures >= failureThreshold) {
+            skipUntilMs = nowMs + cooldownMs
+        }
+    }
+
+    @Synchronized
+    fun reset() {
+        resetLocked(null)
+    }
+
+    private fun resetLocked(nextRegion: String?) {
+        trackedRegion = nextRegion
+        consecutiveFailures = 0
+        skipUntilMs = 0L
+    }
+}
 
 @Singleton
 class StreamResolver @Inject constructor(
     private val innerTubeApi: InnerTubeApi,
     private val okHttpClient: OkHttpClient
 ) {
+    private data class StreamCacheKey(
+        val videoId: String,
+        val quality: AudioQuality,
+        val regionCode: String
+    )
+
     private val initMutex = Mutex()
     private val resolverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val inFlight = ConcurrentHashMap<Pair<String, AudioQuality>, CompletableDeferred<StreamInfo>>()
+    private val inFlight = ConcurrentHashMap<StreamCacheKey, CompletableDeferred<StreamInfo>>()
+    private val resolvedCache = ConcurrentHashMap<StreamCacheKey, StreamInfo>()
+    private val prefetchSemaphore = Semaphore(MAX_PREFETCH_CONCURRENCY)
+    private val visionOsCooldown = VisionOsCooldownTracker()
+    private val lastVisitorForceRefreshMs = AtomicLong(0L)
     @Volatile
     private var newPipeInitialized = false
     @Volatile
@@ -81,18 +139,64 @@ class StreamResolver @Inject constructor(
         runCatching { innerTubeApi.fetchVisitorData(YouTubeClient.VISIONOS) }
     }
 
+    fun invalidateStream(videoId: String) {
+        if (videoId.isBlank()) return
+        resolvedCache.keys.forEach { key ->
+            if (key.videoId == videoId) {
+                resolvedCache.remove(key)
+            }
+        }
+    }
+
+    fun prefetchForDownload(videoIds: List<String>, quality: AudioQuality) {
+        val targets = videoIds.asSequence()
+            .filter { it.isNotBlank() }
+            .distinct()
+            .toList()
+        if (targets.isEmpty()) return
+        resolverScope.launch {
+            val region = runCatching { innerTubeApi.currentRegionCode() }
+                .getOrDefault(ContentRegions.DEFAULT_CODE)
+            val now = System.currentTimeMillis()
+            targets.forEach { videoId ->
+                val key = StreamCacheKey(videoId, quality, region)
+                val cached = resolvedCache[key]
+                val validCached = cached != null && cached.expiresAtEpochMs > now + CACHE_EXPIRY_MARGIN_MS
+                if (!validCached && !inFlight.containsKey(key)) {
+                    launch {
+                        prefetchSemaphore.withPermit {
+                            runCatching { resolveStream(videoId, quality) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     suspend fun resolveStream(
         videoId: String,
         quality: AudioQuality = AudioQuality.HIGH
     ): StreamInfo {
-        val key = videoId to quality
+        val region = innerTubeApi.currentRegionCode()
+        val key = StreamCacheKey(videoId, quality, region)
+        val now = System.currentTimeMillis()
+        resolvedCache[key]?.let { cached ->
+            if (cached.expiresAtEpochMs > now + CACHE_EXPIRY_MARGIN_MS) {
+                return cached
+            }
+            resolvedCache.remove(key, cached)
+        }
+
         while (true) {
             inFlight[key]?.let { return it.await() }
             val created = CompletableDeferred<StreamInfo>()
             if (inFlight.putIfAbsent(key, created) == null) {
                 resolverScope.launch {
                     try {
-                        created.complete(resolveStreamUncached(videoId, quality))
+                        val resolved = resolveStreamUncached(videoId, quality, region)
+                        resolvedCache[key] = resolved
+                        trimResolvedCacheIfNeeded()
+                        created.complete(resolved)
                     } catch (t: Throwable) {
                         created.completeExceptionally(t)
                     } finally {
@@ -104,9 +208,22 @@ class StreamResolver @Inject constructor(
         }
     }
 
+    private fun trimResolvedCacheIfNeeded() {
+        if (resolvedCache.size <= MAX_RESOLVED_CACHE_SIZE) return
+        val cutoff = System.currentTimeMillis() + CACHE_EXPIRY_MARGIN_MS
+        resolvedCache.entries.removeIf { it.value.expiresAtEpochMs <= cutoff }
+        if (resolvedCache.size <= MAX_RESOLVED_CACHE_SIZE) return
+        val overflow = resolvedCache.size - MAX_RESOLVED_CACHE_SIZE
+        resolvedCache.entries
+            .sortedBy { it.value.expiresAtEpochMs }
+            .take(overflow)
+            .forEach { resolvedCache.remove(it.key, it.value) }
+    }
+
     private suspend fun resolveStreamUncached(
         videoId: String,
-        quality: AudioQuality = AudioQuality.HIGH
+        quality: AudioQuality = AudioQuality.HIGH,
+        regionCode: String
     ): StreamInfo = withContext(Dispatchers.IO) {
         var loudnessDb: Float? = null
         val failureNotes = mutableListOf<String>()
@@ -129,14 +246,20 @@ class StreamResolver @Inject constructor(
             if (!client.supportsAuthCookies && !forceRefreshVisitor &&
                 (playability == "LOGIN_REQUIRED" || playability == "UNPLAYABLE")
             ) {
-                val refreshedVd = innerTubeApi.fetchVisitorData(client, forceRefresh = true)
-                if (!refreshedVd.isNullOrBlank() && refreshedVd != visitorData) {
-                    root = innerTubeApi.getPlayerRaw(
-                        videoId = videoId,
-                        client = client,
-                        visitorDataOverride = refreshedVd
-                    )
-                    playability = extractPlayabilityStatus(root)
+                val now = System.currentTimeMillis()
+                val prevRefresh = lastVisitorForceRefreshMs.get()
+                val canForceRefresh = (now - prevRefresh) >= VISITOR_FORCE_REFRESH_COOLDOWN_MS &&
+                    lastVisitorForceRefreshMs.compareAndSet(prevRefresh, now)
+                if (canForceRefresh) {
+                    val refreshedVd = innerTubeApi.fetchVisitorData(client, forceRefresh = true)
+                    if (!refreshedVd.isNullOrBlank() && refreshedVd != visitorData) {
+                        root = innerTubeApi.getPlayerRaw(
+                            videoId = videoId,
+                            client = client,
+                            visitorDataOverride = refreshedVd
+                        )
+                        playability = extractPlayabilityStatus(root)
+                    }
                 }
             }
 
@@ -151,16 +274,25 @@ class StreamResolver @Inject constructor(
             return stream
         }
 
-        // 1. Primary: VISIONOS (101) with fresh visitorData — fast-path skips extra blocking probe
-        val visionOsAttempt = runCatching {
-            tryInnerTubeClient(YouTubeClient.VISIONOS, verifyReachable = false)
+        // 1. Primary: VISIONOS (101) — skip temporarily if repeatedly rejected in this region.
+        var visionOsFailed = false
+        if (!visionOsCooldown.shouldSkipVisionOs(regionCode, System.currentTimeMillis())) {
+            val visionOsAttempt = runCatching {
+                tryInnerTubeClient(YouTubeClient.VISIONOS, verifyReachable = false)
+            }
+            visionOsAttempt.getOrNull()?.let { stream ->
+                visionOsCooldown.recordVisionOsSuccess(regionCode)
+                return@withContext stream
+            }
+            visionOsFailed = true
+            visionOsAttempt.exceptionOrNull()?.let { failureNotes += "VISIONOS: ${it.message}" }
+        } else {
+            failureNotes += "VISIONOS: cooldown"
         }
-        visionOsAttempt.getOrNull()?.let { return@withContext it }
-        visionOsAttempt.exceptionOrNull()?.let { failureNotes += "VISIONOS: ${it.message}" }
 
         // 2. Secondary: NewPipeExtractor v0.27.0 (fast-path without duplicate 16KB pre-probe)
         val npAttempt = runCatching {
-            ensureNewPipeInitialized(innerTubeApi.currentRegionCode())
+            ensureNewPipeInitialized(regionCode)
             val npInfo = NpStreamInfo.getInfo(
                 ServiceList.YouTube,
                 "https://www.youtube.com/watch?v=$videoId"
@@ -194,7 +326,12 @@ class StreamResolver @Inject constructor(
                 userAgent = NEWPIPE_USER_AGENT
             )
         }
-        npAttempt.getOrNull()?.let { return@withContext it }
+        npAttempt.getOrNull()?.let { stream ->
+            if (visionOsFailed) {
+                visionOsCooldown.recordVisionOsFailureWithFallbackSuccess(regionCode, System.currentTimeMillis())
+            }
+            return@withContext stream
+        }
         npAttempt.exceptionOrNull()?.let { failureNotes += "NEWPIPE: ${it.message}" }
 
         // 3. Last-resort fallbacks strictly gated by open-range verification
@@ -205,7 +342,12 @@ class StreamResolver @Inject constructor(
         )
         for (client in fallbackClients) {
             val attempt = runCatching { tryInnerTubeClient(client, verifyReachable = true) }
-            attempt.getOrNull()?.let { return@withContext it }
+            attempt.getOrNull()?.let { stream ->
+                if (visionOsFailed) {
+                    visionOsCooldown.recordVisionOsFailureWithFallbackSuccess(regionCode, System.currentTimeMillis())
+                }
+                return@withContext stream
+            }
             attempt.exceptionOrNull()?.let { failureNotes += "${client.name}: ${it.message}" }
         }
 
@@ -351,5 +493,9 @@ class StreamResolver @Inject constructor(
     companion object {
         const val NEWPIPE_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0"
+        private const val CACHE_EXPIRY_MARGIN_MS = 60_000L
+        private const val MAX_RESOLVED_CACHE_SIZE = 256
+        private const val MAX_PREFETCH_CONCURRENCY = 4
+        private const val VISITOR_FORCE_REFRESH_COOLDOWN_MS = 30_000L
     }
 }
