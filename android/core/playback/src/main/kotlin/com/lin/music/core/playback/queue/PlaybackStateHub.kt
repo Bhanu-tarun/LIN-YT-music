@@ -6,6 +6,7 @@ import com.lin.music.core.model.RepeatMode
 import com.lin.music.core.model.SleepTimerState
 import com.lin.music.core.model.StreamInfo
 import com.lin.music.core.model.Track
+import com.lin.music.core.model.UserPreferences
 import com.lin.music.core.playback.audio.ReactiveAudioProcessor
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +50,12 @@ class PlaybackStateHub @Inject constructor(
     private val _audioSessionId = MutableStateFlow(0)
     val audioSessionId: StateFlow<Int> = _audioSessionId.asStateFlow()
 
+    private val _activeOutputDevice = MutableStateFlow<Pair<String, String>?>(null)
+    val activeOutputDevice: StateFlow<Pair<String, String>?> = _activeOutputDevice.asStateFlow()
+
+    private val _isCarConnected = MutableStateFlow(false)
+    val isCarConnected: StateFlow<Boolean> = _isCarConnected.asStateFlow()
+
     private val _isUiForeground = MutableStateFlow(false)
     val isUiForeground: StateFlow<Boolean> = _isUiForeground.asStateFlow()
 
@@ -69,6 +76,9 @@ class PlaybackStateHub @Inject constructor(
 
     @Volatile
     var sponsorBlockEnabled: Boolean = false
+
+    @Volatile
+    var latestPreferences: UserPreferences = UserPreferences()
 
     @Volatile
     var autoMixContinuation: String? = null
@@ -109,6 +119,18 @@ class PlaybackStateHub @Inject constructor(
         _audioSessionId.value = sessionId
     }
 
+    fun publishActiveOutputDevice(deviceKey: String?, deviceName: String?) {
+        _activeOutputDevice.value = if (!deviceKey.isNullOrBlank() && !deviceName.isNullOrBlank()) {
+            deviceKey to deviceName
+        } else {
+            null
+        }
+    }
+
+    fun setCarConnected(connected: Boolean) {
+        _isCarConnected.value = connected
+    }
+
     fun setUiForeground(foreground: Boolean) {
         _isUiForeground.value = foreground
     }
@@ -125,8 +147,7 @@ class PlaybackStateHub @Inject constructor(
         val cur = queueEngine.snapshot
         val newItems = cur.items.map { if (it.videoId == updatedTrack.videoId) updatedTrack else it }
         if (newItems != cur.items) {
-            val nextSnap = cur.copy(items = newItems)
-            queueEngine.replaceWithContext(newItems, cur.currentIndex, cur.sourceLabel)
+            val nextSnap = queueEngine.updateItemsInPlace(newItems)
             _queueSnapshot.value = nextSnap
         }
     }
@@ -137,5 +158,8 @@ class PlaybackStateHub @Inject constructor(
         fun extend(extraMs: Long)
         fun cancel()
         fun applyPreferences(normalize: Boolean, skipSilence: Boolean, speed: Float, pitch: Float)
+        fun requestMicroFadePause()
+        fun requestMicroFadePlay()
+        fun forceApplyEq()
     }
 }

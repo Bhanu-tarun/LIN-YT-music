@@ -29,13 +29,18 @@ import com.lin.music.core.model.HomeItem
 import com.lin.music.core.model.HomePage
 import com.lin.music.core.model.ItemTagRecord
 import com.lin.music.core.model.LinBackupPayload
+import com.lin.music.core.model.ListeningStatsCalculator
+import com.lin.music.core.model.ListeningStatsSummary
 import com.lin.music.core.model.LyricsResult
+import com.lin.music.core.model.LyricsSearchCandidate
 import com.lin.music.core.model.NextPage
+import com.lin.music.core.model.PlaySessionRecord
 import com.lin.music.core.model.PlaylistDetail
 import com.lin.music.core.model.PlaylistSummary
 import com.lin.music.core.model.SearchFilter
 import com.lin.music.core.model.SearchResultPage
 import com.lin.music.core.model.SpeedDialEntry
+import com.lin.music.core.model.StatsRange
 import com.lin.music.core.model.Track
 import com.lin.music.core.model.speedDialKey
 import kotlinx.coroutines.async
@@ -223,6 +228,9 @@ class MusicRepository @Inject constructor(
     fun observeSearchHistory(): Flow<List<String>> =
         cacheDao.observeSearchHistory().map { list -> list.map { it.query } }
 
+    fun observePlayCounts(): Flow<Map<String, Int>> =
+        trackDao.observeAllKnownTracks().map { list -> list.associate { it.videoId to it.playCount } }
+
     private suspend fun mergeUpsertTracks(
         tracks: List<Track>,
         markInLibrary: Boolean? = null,
@@ -257,24 +265,27 @@ class MusicRepository @Inject constructor(
     }
 
     suspend fun refreshLibraryPlaylists(): Result<List<PlaylistSummary>> = runCatching {
+        val existingById = playlistDao.getAllPlaylistsSnapshot().associateBy { it.id }
         val pls = innerTubeApi.getLibraryPlaylists()
         playlistDao.upsertPlaylists(pls.map {
+            val prev = existingById[it.id]
             PlaylistEntity(
                 id = it.id,
                 browseId = it.browseId,
                 title = it.title,
                 subtitle = it.subtitle,
-                description = null,
+                description = prev?.description,
                 thumbnailUrl = it.thumbnailUrl,
                 trackCount = it.trackCount,
                 isEditable = it.isEditable,
-                inLibrary = true
+                inLibrary = true,
+                autoDownload = prev?.autoDownload == true
             )
         })
         if (pls.isNotEmpty()) {
             playlistDao.prunePlaylistsNotIn((pls.map { it.id } + "LM").distinct())
         }
-        pls
+        pls.map { it.copy(autoDownload = existingById[it.id]?.autoDownload == true) }
     }
 
     suspend fun refreshLibrarySongs(): Result<List<Track>> = runCatching {
@@ -322,6 +333,7 @@ class MusicRepository @Inject constructor(
         }
         val allLiked = accumulated.distinctBy { it.videoId }.take(MAX_COLLECTION_TRACKS)
         mergeUpsertTracks(allLiked, markLiked = true)
+        val likedAutoDl = playlistDao.getPlaylist("LM")?.autoDownload == true
         playlistDao.upsertPlaylists(
             listOf(
                 PlaylistEntity(
@@ -332,7 +344,8 @@ class MusicRepository @Inject constructor(
                     description = firstLiked.description,
                     thumbnailUrl = firstLiked.thumbnailUrl,
                     trackCount = allLiked.size,
-                    isEditable = false
+                    isEditable = false,
+                    autoDownload = likedAutoDl
                 )
             )
         )
@@ -370,6 +383,7 @@ class MusicRepository @Inject constructor(
     }
 
     suspend fun syncAccountAndLibrary(): Result<Unit> = runCatching {
+        if (preferencesStore.current().offlineMode) return@runCatching
         val session = authStore.currentSession() ?: error("Not signed in")
         coroutineScope {
             val accountJob = async {
@@ -484,6 +498,7 @@ class MusicRepository @Inject constructor(
     suspend fun cachePlaylistForOffline(playlist: PlaylistDetail) {
         val existing = playlistDao.getPlaylist(playlist.id)
         val isLib = (existing?.inLibrary == true) || playlist.inLibrary || playlist.isEditable || playlist.id == "LM"
+        val keepAutoDl = (existing?.autoDownload == true) || playlist.autoDownload
         playlistDao.upsertPlaylists(
             listOf(
                 PlaylistEntity(
@@ -495,7 +510,8 @@ class MusicRepository @Inject constructor(
                     thumbnailUrl = playlist.thumbnailUrl,
                     trackCount = playlist.tracks.size,
                     isEditable = (existing?.isEditable == true) || playlist.isEditable,
-                    inLibrary = isLib
+                    inLibrary = isLib,
+                    autoDownload = keepAutoDl
                 )
             )
         )
@@ -508,12 +524,18 @@ class MusicRepository @Inject constructor(
 
     suspend fun getHome(continuation: String? = null): HomePage = innerTubeApi.getHome(continuation)
 
+    suspend fun getMixedForYou(): HomePage = innerTubeApi.getMixedForYou()
+
     suspend fun loadAlbumProgressive(
         browseId: String,
         onUpdate: (AlbumDetail, Boolean) -> Unit = { _, _ -> }
     ): AlbumDetail {
         val cachedAlbum = albumArtistDao.getAlbum(browseId)
-        val firstRes = runCatching { innerTubeApi.getAlbum(browseId) }
+        val firstRes = if (preferencesStore.current().offlineMode) {
+            Result.failure(IllegalStateException("Offline mode active"))
+        } else {
+            runCatching { innerTubeApi.getAlbum(browseId) }
+        }
         val page1 = firstRes.getOrElse { err ->
             val cachedTracks = trackDao.getTracksByAlbumId(browseId).map { it.toModel() }
             val fallback = if (cachedAlbum != null && cachedTracks.isNotEmpty()) {
@@ -641,8 +663,47 @@ class MusicRepository @Inject constructor(
     ): PlaylistDetail {
         val normalizedId = browseId.removePrefix("VL")
         val existing = playlistDao.getPlaylist(normalizedId)
-        val firstRes = runCatching { innerTubeApi.getPlaylist(browseId, null) }
-        val page1 = firstRes.getOrElse { err ->
+        val offline = preferencesStore.current().offlineMode
+        val firstRes = if (offline) {
+            Result.failure(IllegalStateException("Offline mode active"))
+        } else {
+            runCatching { innerTubeApi.getPlaylist(browseId, null) }
+        }
+        val effectiveFirstRes = if (!offline &&
+            normalizedId.startsWith("RD", ignoreCase = true) &&
+            (firstRes.isFailure || firstRes.getOrNull()?.tracks.isNullOrEmpty())
+        ) {
+            val browsed = firstRes.getOrNull()
+            val nextRes = runCatching { innerTubeApi.getNext(playlistId = normalizedId) }.getOrNull()
+            if (nextRes != null && nextRes.tracks.isNotEmpty()) {
+                val resolvedTitle = browsed?.title?.takeIf { it.isNotBlank() && it != "Playlist" }
+                    ?: nextRes.playlistTitle
+                    ?: existing?.title
+                    ?: "Personal Mix"
+                Result.success(
+                    PlaylistDetail(
+                        id = normalizedId,
+                        browseId = if (browseId.startsWith("VL")) browseId else "VL$normalizedId",
+                        title = resolvedTitle,
+                        description = browsed?.description ?: existing?.description,
+                        author = browsed?.author ?: existing?.subtitle ?: "YouTube Music",
+                        thumbnailUrl = browsed?.thumbnailUrl
+                            ?: existing?.thumbnailUrl
+                            ?: nextRes.tracks.firstOrNull { !it.thumbnailUrl.isNullOrBlank() }?.thumbnailUrl,
+                        tracks = nextRes.tracks,
+                        continuation = null,
+                        isEditable = false,
+                        inLibrary = existing?.inLibrary == true,
+                        radioEndpointPlaylistId = normalizedId
+                    )
+                )
+            } else {
+                firstRes
+            }
+        } else {
+            firstRes
+        }
+        val page1 = effectiveFirstRes.getOrElse { err ->
             val cachedTracks = playlistDao.getPlaylistTracksSnapshot(normalizedId)
             if (existing != null && cachedTracks.isNotEmpty()) {
                 val crossRefs = playlistDao.getPlaylistCrossRefs(normalizedId)
@@ -677,30 +738,34 @@ class MusicRepository @Inject constructor(
             inLibrary = resolvedInLibrary
         )
 
-        val accumulated = page1.tracks.take(MAX_COLLECTION_TRACKS).toMutableList()
+        val isDynamicMix = normalizedId.startsWith("RD", ignoreCase = true)
+        val maxTracks = if (isDynamicMix) 100 else MAX_COLLECTION_TRACKS
+        val maxPages = if (isDynamicMix) 2 else MAX_CONTINUATION_PAGES
+
+        val accumulated = page1.tracks.take(maxTracks).toMutableList()
         var nextToken = page1.continuation
         val seenTokens = mutableSetOf<String>()
         var pages = 1
 
         onUpdate(
             baseResolved.copy(tracks = accumulated.toList(), continuation = nextToken),
-            !nextToken.isNullOrBlank() && accumulated.size < MAX_COLLECTION_TRACKS
+            !nextToken.isNullOrBlank() && accumulated.size < maxTracks && pages < maxPages
         )
 
         while (!nextToken.isNullOrBlank() &&
-            accumulated.size < MAX_COLLECTION_TRACKS &&
-            pages < MAX_CONTINUATION_PAGES &&
+            accumulated.size < maxTracks &&
+            pages < maxPages &&
             seenTokens.add(nextToken)
         ) {
             val nextPage = runCatching { innerTubeApi.getPlaylist(browseId, nextToken) }.getOrNull() ?: break
             if (nextPage.tracks.isEmpty()) break
-            val remaining = MAX_COLLECTION_TRACKS - accumulated.size
+            val remaining = maxTracks - accumulated.size
             accumulated += nextPage.tracks.take(remaining)
             pages++
             nextToken = nextPage.continuation?.takeIf { it.isNotBlank() }
             onUpdate(
                 baseResolved.copy(tracks = accumulated.toList(), continuation = nextToken),
-                !nextToken.isNullOrBlank() && accumulated.size < MAX_COLLECTION_TRACKS && pages < MAX_CONTINUATION_PAGES
+                !nextToken.isNullOrBlank() && accumulated.size < maxTracks && pages < maxPages
             )
         }
 
@@ -711,6 +776,7 @@ class MusicRepository @Inject constructor(
         onUpdate(finalDetail, false)
 
         if (resolvedInLibrary) {
+            val existingAutoDl = playlistDao.getPlaylist(finalDetail.id)?.autoDownload == true
             playlistDao.upsertPlaylists(
                 listOf(
                     PlaylistEntity(
@@ -722,7 +788,8 @@ class MusicRepository @Inject constructor(
                         thumbnailUrl = finalDetail.thumbnailUrl,
                         trackCount = finalDetail.tracks.size,
                         isEditable = finalDetail.isEditable,
-                        inLibrary = true
+                        inLibrary = true,
+                        autoDownload = existingAutoDl
                     )
                 )
             )
@@ -732,7 +799,7 @@ class MusicRepository @Inject constructor(
                 PlaylistTrackCrossRef(finalDetail.id, track.videoId, track.setVideoId, idx)
             })
         }
-        return finalDetail
+        return finalDetail.copy(autoDownload = playlistDao.getPlaylist(finalDetail.id)?.autoDownload == true)
     }
 
     suspend fun getPlaylist(browseId: String, continuation: String? = null): PlaylistDetail {
@@ -746,6 +813,7 @@ class MusicRepository @Inject constructor(
         val target = !playlist.inLibrary
         innerTubeApi.saveAlbumToLibrary(playlist.id, target)
         if (target) {
+            val existingAutoDl = playlistDao.getPlaylist(playlist.id)?.autoDownload == true || playlist.autoDownload
             playlistDao.upsertPlaylists(
                 listOf(
                     PlaylistEntity(
@@ -756,7 +824,8 @@ class MusicRepository @Inject constructor(
                         description = playlist.description,
                         thumbnailUrl = playlist.thumbnailUrl,
                         trackCount = playlist.tracks.size,
-                        isEditable = playlist.isEditable
+                        isEditable = playlist.isEditable,
+                        autoDownload = existingAutoDl
                     )
                 )
             )
@@ -1020,10 +1089,15 @@ class MusicRepository @Inject constructor(
     }
 
     suspend fun getLyrics(track: Track): LyricsResult {
-        cacheDao.getLyrics(track.videoId)?.toModel()?.let { cached ->
+        val cachedEntity = cacheDao.getLyrics(track.videoId)
+        val existingOffset = cachedEntity?.syncOffsetMs ?: 0L
+        cachedEntity?.toModel()?.let { cached ->
             if (cached.syncedLines.isNotEmpty() || !cached.plainText.isNullOrBlank()) {
                 return cached
             }
+        }
+        if (preferencesStore.current().offlineMode) {
+            return LyricsResult(videoId = track.videoId, source = "Offline", syncOffsetMs = existingOffset)
         }
         val fetched = lyricsRepository.fetchLyrics(
             videoId = track.videoId,
@@ -1031,12 +1105,111 @@ class MusicRepository @Inject constructor(
             artist = track.artistDisplay,
             album = track.album?.title,
             durationMs = track.durationMs
-        )
+        ).copy(syncOffsetMs = existingOffset)
         if (fetched.syncedLines.isNotEmpty() || !fetched.plainText.isNullOrBlank()) {
-            cacheDao.putLyrics(LyricsCacheEntity(track.videoId, json.encodeToString(fetched)))
+            cacheDao.putLyrics(LyricsCacheEntity(track.videoId, json.encodeToString(fetched), syncOffsetMs = existingOffset))
         }
         return fetched
     }
+
+    suspend fun searchLyrics(query: String): List<LyricsSearchCandidate> =
+        lyricsRepository.searchLyrics(query)
+
+    suspend fun selectCustomLyrics(videoId: String, candidate: LyricsSearchCandidate): LyricsResult {
+        val existingOffset = cacheDao.getLyrics(videoId)?.syncOffsetMs ?: 0L
+        val picked = lyricsRepository.candidateToResult(videoId, candidate, existingOffset)
+        cacheDao.putLyrics(LyricsCacheEntity(videoId, json.encodeToString(picked), syncOffsetMs = existingOffset))
+        return picked
+    }
+
+    suspend fun updateLyricsSyncOffset(videoId: String, offsetMs: Long): Long {
+        val clamped = offsetMs.coerceIn(-5000L, 5000L)
+        val existing = cacheDao.getLyrics(videoId)
+        if (existing != null) {
+            cacheDao.updateLyricsOffset(videoId, clamped)
+        } else {
+            val placeholder = LyricsResult(videoId = videoId, source = "Local Offset", syncOffsetMs = clamped)
+            cacheDao.putLyrics(LyricsCacheEntity(videoId, json.encodeToString(placeholder), syncOffsetMs = clamped))
+        }
+        return clamped
+    }
+
+    suspend fun translateLyrics(lines: List<String>, targetLanguage: String = "en"): List<String> =
+        lyricsRepository.translateLines(lines, targetLanguage)
+
+    suspend fun setPlaylistAutoDownload(playlistId: String, enabled: Boolean) {
+        playlistDao.setAutoDownload(playlistId.removePrefix("VL"), enabled)
+    }
+
+    suspend fun getAutoDownloadPlaylistsSnapshot(): List<PlaylistSummary> =
+        playlistDao.getAutoDownloadPlaylists().map { it.toSummary() }
+
+    suspend fun getAutoDownloadTracksSnapshot(): List<Track> {
+        val pls = playlistDao.getAutoDownloadPlaylists()
+        if (pls.isEmpty()) return emptyList()
+        return pls.flatMap { pl ->
+            playlistDao.getPlaylistTracksSnapshot(pl.id).map { it.toModel() }
+        }.distinctBy { it.videoId }
+    }
+
+    suspend fun getPlaylistTracksSnapshot(playlistId: String): List<Track> =
+        playlistDao.getPlaylistTracksSnapshot(playlistId.removePrefix("VL")).map { it.toModel() }
+
+    suspend fun getAllPlayCountsSnapshot(): Map<String, Int> =
+        trackDao.getAllKnownTracksSnapshot().associate { it.videoId to it.playCount }
+
+    suspend fun createPlaylistFromQueue(title: String, tracks: List<Track>): Result<String> = runCatching {
+        val uniqueTracks = tracks.distinctBy { it.videoId }.take(100)
+        val createdId = createPlaylist(title = title, description = "Saved from LIN queue", privacy = "PRIVATE")
+            .getOrThrow()
+        for (track in uniqueTracks) {
+            addTrackToPlaylist(createdId, track)
+        }
+        createdId
+    }
+
+    suspend fun removePlaylistDuplicates(
+        playlistId: String,
+        tracks: List<Track>,
+        duplicateIndices: Set<Int>
+    ): Result<Int> = runCatching {
+        if (duplicateIndices.isEmpty()) return@runCatching 0
+        val normalizedId = playlistId.removePrefix("VL")
+        var removedCount = 0
+        val orderedRemovals = duplicateIndices.sortedDescending().mapNotNull { idx -> tracks.getOrNull(idx) }
+        for (track in orderedRemovals) {
+            val res = removeTrackFromPlaylist(normalizedId, track)
+            if (res.isSuccess) removedCount++
+        }
+        val remaining = tracks.filterIndexed { index, _ -> index !in duplicateIndices }
+        playlistDao.clearPlaylistTracks(normalizedId)
+        playlistDao.insertPlaylistTracks(
+            remaining.mapIndexed { idx, tr ->
+                PlaylistTrackCrossRef(normalizedId, tr.videoId, tr.setVideoId, idx)
+            }
+        )
+        removedCount
+    }
+
+    fun observeListeningStats(range: StatsRange): Flow<ListeningStatsSummary> =
+        combine(
+            cacheDao.observeAllPlaySessions(),
+            trackDao.observeAllKnownTracks()
+        ) { sessions, tracks ->
+            val records = sessions.map {
+                PlaySessionRecord(
+                    videoId = it.videoId,
+                    listenedMs = it.listenedMs,
+                    playedAtMs = it.playedAtMs
+                )
+            }
+            val tracksById = tracks.associate { it.videoId to it.toModel() }
+            ListeningStatsCalculator.calculate(
+                sessions = records,
+                tracksById = tracksById,
+                range = range
+            )
+        }
 
     suspend fun addTag(itemId: String, itemType: String, rawTag: String) {
         val normalized = rawTag.trim().lowercase().removePrefix("#")

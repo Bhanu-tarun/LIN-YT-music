@@ -41,9 +41,21 @@ data class UserPreferences(
     val playbackPitch: Float = 1.0f,
     val showTrackThumbnails: Boolean = false,
     val contentRegion: String = ContentRegions.DEFAULT_CODE,
-    val songsSortOrder: SongSortOrder = SongSortOrder.DEFAULT,
-    val albumsSortOrder: AlbumSortOrder = AlbumSortOrder.DEFAULT,
-    val artistsSortOrder: ArtistSortOrder = ArtistSortOrder.DEFAULT
+    val songsSortOrder: SongSortOrder = SongSortOrder.TITLE_ASC,
+    val albumsSortOrder: AlbumSortOrder = AlbumSortOrder.TITLE_ASC,
+    val artistsSortOrder: ArtistSortOrder = ArtistSortOrder.NAME_ASC,
+    val offlineMode: Boolean = false,
+    val crossfadeSeconds: Int = 0,
+    val microFadeOnPause: Boolean = true,
+    val shuffleMode: ShuffleMode = ShuffleMode.TRUE_RANDOM,
+    val eqEnabled: Boolean = false,
+    val activeEqProfileId: String = "flat",
+    val customEqProfiles: List<EqualizerProfile> = emptyList(),
+    val bluetoothEqAssignments: List<BluetoothEqAssignment> = emptyList(),
+    val lyricsShowOriginal: Boolean = true,
+    val lyricsShowRomanized: Boolean = false,
+    val lyricsShowTranslation: Boolean = false,
+    val lyricsTranslationLanguage: String = "en"
 )
 
 @Serializable

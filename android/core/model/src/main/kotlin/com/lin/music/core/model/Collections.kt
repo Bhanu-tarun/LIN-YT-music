@@ -11,7 +11,8 @@ data class PlaylistSummary(
     val thumbnailUrl: String? = null,
     val trackCount: Int? = null,
     val isEditable: Boolean = false,
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    val autoDownload: Boolean = false
 )
 
 @Serializable
@@ -29,7 +30,8 @@ data class PlaylistDetail(
     val privacyStatus: String = "PRIVATE",
     val radioEndpointPlaylistId: String? = null,
     val shuffleEndpointPlaylistId: String? = null,
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    val autoDownload: Boolean = false
 )
 
 @Serializable
@@ -212,5 +214,6 @@ data class NextPage(
     val continuation: String? = null,
     val lyricsBrowseId: String? = null,
     val relatedBrowseId: String? = null,
-    val mixChips: List<MixChip> = emptyList()
+    val mixChips: List<MixChip> = emptyList(),
+    val playlistTitle: String? = null
 )

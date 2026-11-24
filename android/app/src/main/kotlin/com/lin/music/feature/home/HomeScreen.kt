@@ -119,7 +119,28 @@ fun HomeScreen(
             }
         }
 
-        // 2. Your Playlists from YouTube Music (shown BEFORE community playlists)
+        // 2. YouTube-Generated Mixes (featured near the top before playlists)
+        if (uiState.youtubeMixes.isNotEmpty()) {
+            item(key = "home_yt_mixes") {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(linLabel("mixed for you"), style = LinTextStyles.sectionHeading, color = linColors.textPrimary)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        itemsIndexed(uiState.youtubeMixes, key = { idx, mix -> "ytm_mix_${idx}_${mix.id}" }) { _, mix ->
+                            HomeSquareCard(
+                                title = mix.title,
+                                subtitle = mix.subtitle ?: linLabel("made for you"),
+                                imageUrl = mix.thumbnailUrl,
+                                isCircle = false,
+                                cardWidthDp = 152,
+                                onClick = { onPlaylistClick(mix.browseId) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Your Playlists from YouTube Music (shown BEFORE community playlists)
         if (uiState.userPlaylists.isNotEmpty()) {
             item(key = "home_your_playlists") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {

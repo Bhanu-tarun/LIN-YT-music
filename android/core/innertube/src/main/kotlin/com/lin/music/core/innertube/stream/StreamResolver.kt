@@ -104,6 +104,7 @@ class StreamResolver @Inject constructor(
     private val prefetchSemaphore = Semaphore(MAX_PREFETCH_CONCURRENCY)
     private val visionOsCooldown = VisionOsCooldownTracker()
     private val lastVisitorForceRefreshMs = AtomicLong(0L)
+    private val cacheGeneration = AtomicLong(0L)
     @Volatile
     private var newPipeInitialized = false
     @Volatile
@@ -139,13 +140,26 @@ class StreamResolver @Inject constructor(
         runCatching { innerTubeApi.fetchVisitorData(YouTubeClient.VISIONOS) }
     }
 
-    fun invalidateStream(videoId: String) {
-        if (videoId.isBlank()) return
-        resolvedCache.keys.forEach { key ->
-            if (key.videoId == videoId) {
-                resolvedCache.remove(key)
+    fun invalidateStream(videoId: String, clearVisitorData: Boolean = false) {
+        cacheGeneration.incrementAndGet()
+        if (videoId.isNotBlank()) {
+            resolvedCache.keys.forEach { key ->
+                if (key.videoId == videoId) {
+                    resolvedCache.remove(key)
+                }
             }
         }
+        if (clearVisitorData) {
+            visionOsCooldown.reset()
+            innerTubeApi.clearVisitorDataCache()
+        }
+    }
+
+    fun invalidateAllStreams() {
+        cacheGeneration.incrementAndGet()
+        resolvedCache.clear()
+        visionOsCooldown.reset()
+        innerTubeApi.clearVisitorDataCache()
     }
 
     fun prefetchForDownload(videoIds: List<String>, quality: AudioQuality) {
@@ -191,11 +205,14 @@ class StreamResolver @Inject constructor(
             inFlight[key]?.let { return it.await() }
             val created = CompletableDeferred<StreamInfo>()
             if (inFlight.putIfAbsent(key, created) == null) {
+                val startGen = cacheGeneration.get()
                 resolverScope.launch {
                     try {
                         val resolved = resolveStreamUncached(videoId, quality, region)
-                        resolvedCache[key] = resolved
-                        trimResolvedCacheIfNeeded()
+                        if (cacheGeneration.get() == startGen) {
+                            resolvedCache[key] = resolved
+                            trimResolvedCacheIfNeeded()
+                        }
                         created.complete(resolved)
                     } catch (t: Throwable) {
                         created.completeExceptionally(t)

@@ -16,13 +16,18 @@ import com.lin.music.core.model.AmbientMode
 import com.lin.music.core.model.AmbientReactivity
 import com.lin.music.core.model.ArtistSortOrder
 import com.lin.music.core.model.AudioQuality
+import com.lin.music.core.model.BluetoothEqAssignment
 import com.lin.music.core.model.ContentRegions
+import com.lin.music.core.model.EqualizerProfile
+import com.lin.music.core.model.ShuffleMode
 import com.lin.music.core.model.SongSortOrder
 import com.lin.music.core.model.UserPreferences
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -64,6 +69,19 @@ class PreferencesStore @Inject constructor(
         val SONGS_SORT_ORDER = stringPreferencesKey("songs_sort_order")
         val ALBUMS_SORT_ORDER = stringPreferencesKey("albums_sort_order")
         val ARTISTS_SORT_ORDER = stringPreferencesKey("artists_sort_order")
+        val OFFLINE_MODE = booleanPreferencesKey("offline_mode")
+        val OFFLINE_MODE_AUTO = booleanPreferencesKey("offline_mode_auto")
+        val CROSSFADE_SECONDS = intPreferencesKey("crossfade_seconds")
+        val MICRO_FADE_ON_PAUSE = booleanPreferencesKey("micro_fade_on_pause")
+        val SHUFFLE_MODE = stringPreferencesKey("shuffle_mode")
+        val EQ_ENABLED = booleanPreferencesKey("eq_enabled")
+        val ACTIVE_EQ_PROFILE_ID = stringPreferencesKey("active_eq_profile_id")
+        val CUSTOM_EQ_PROFILES_JSON = stringPreferencesKey("custom_eq_profiles_json")
+        val BT_EQ_ASSIGNMENTS_JSON = stringPreferencesKey("bt_eq_assignments_json")
+        val LYRICS_SHOW_ORIGINAL = booleanPreferencesKey("lyrics_show_original")
+        val LYRICS_SHOW_ROMANIZED = booleanPreferencesKey("lyrics_show_romanized")
+        val LYRICS_SHOW_TRANSLATION = booleanPreferencesKey("lyrics_show_translation")
+        val LYRICS_TRANSLATION_LANG = stringPreferencesKey("lyrics_translation_lang")
     }
 
     private fun fromPreferences(prefs: Preferences): UserPreferences {
@@ -97,13 +115,32 @@ class PreferencesStore @Inject constructor(
             showTrackThumbnails = prefs[Keys.SHOW_THUMBNAILS] ?: false,
             contentRegion = region,
             songsSortOrder = prefs[Keys.SONGS_SORT_ORDER]?.let { runCatching { SongSortOrder.valueOf(it) }.getOrNull() }
-                ?: SongSortOrder.DEFAULT,
+                ?: SongSortOrder.TITLE_ASC,
             albumsSortOrder = prefs[Keys.ALBUMS_SORT_ORDER]?.let { runCatching { AlbumSortOrder.valueOf(it) }.getOrNull() }
-                ?: AlbumSortOrder.DEFAULT,
+                ?: AlbumSortOrder.TITLE_ASC,
             artistsSortOrder = prefs[Keys.ARTISTS_SORT_ORDER]?.let { runCatching { ArtistSortOrder.valueOf(it) }.getOrNull() }
-                ?: ArtistSortOrder.DEFAULT
+                ?: ArtistSortOrder.NAME_ASC,
+            offlineMode = prefs[Keys.OFFLINE_MODE] ?: false,
+            crossfadeSeconds = (prefs[Keys.CROSSFADE_SECONDS] ?: 0).coerceIn(0, 10),
+            microFadeOnPause = prefs[Keys.MICRO_FADE_ON_PAUSE] ?: true,
+            shuffleMode = prefs[Keys.SHUFFLE_MODE]?.let { runCatching { ShuffleMode.valueOf(it) }.getOrNull() }
+                ?: ShuffleMode.TRUE_RANDOM,
+            eqEnabled = prefs[Keys.EQ_ENABLED] ?: false,
+            activeEqProfileId = prefs[Keys.ACTIVE_EQ_PROFILE_ID] ?: "flat",
+            customEqProfiles = prefs[Keys.CUSTOM_EQ_PROFILES_JSON]
+                ?.let { raw -> runCatching { prefsJson.decodeFromString<List<EqualizerProfile>>(raw) }.getOrNull() }
+                ?: emptyList(),
+            bluetoothEqAssignments = prefs[Keys.BT_EQ_ASSIGNMENTS_JSON]
+                ?.let { raw -> runCatching { prefsJson.decodeFromString<List<BluetoothEqAssignment>>(raw) }.getOrNull() }
+                ?: emptyList(),
+            lyricsShowOriginal = prefs[Keys.LYRICS_SHOW_ORIGINAL] ?: true,
+            lyricsShowRomanized = prefs[Keys.LYRICS_SHOW_ROMANIZED] ?: false,
+            lyricsShowTranslation = prefs[Keys.LYRICS_SHOW_TRANSLATION] ?: false,
+            lyricsTranslationLanguage = prefs[Keys.LYRICS_TRANSLATION_LANG] ?: "en"
         )
     }
+
+    private val prefsJson = Json { ignoreUnknownKeys = true }
 
     val preferencesFlow: Flow<UserPreferences> = context.userPrefsDataStore.data.map(::fromPreferences)
 
@@ -148,6 +185,15 @@ class PreferencesStore @Inject constructor(
         }
     }
 
+    suspend fun wasOfflineModeAutoEnabled(): Boolean =
+        context.userPrefsDataStore.data.map { it[Keys.OFFLINE_MODE_AUTO] ?: false }.first()
+
+    suspend fun setOfflineModeAutoEnabled(autoEnabled: Boolean) {
+        context.userPrefsDataStore.edit { prefs ->
+            prefs[Keys.OFFLINE_MODE_AUTO] = autoEnabled
+        }
+    }
+
     suspend fun update(transform: (UserPreferences) -> UserPreferences) {
         context.userPrefsDataStore.edit { prefs ->
             val current = fromPreferences(prefs)
@@ -179,6 +225,18 @@ class PreferencesStore @Inject constructor(
             prefs[Keys.SONGS_SORT_ORDER] = updated.songsSortOrder.name
             prefs[Keys.ALBUMS_SORT_ORDER] = updated.albumsSortOrder.name
             prefs[Keys.ARTISTS_SORT_ORDER] = updated.artistsSortOrder.name
+            prefs[Keys.OFFLINE_MODE] = updated.offlineMode
+            prefs[Keys.CROSSFADE_SECONDS] = updated.crossfadeSeconds.coerceIn(0, 10)
+            prefs[Keys.MICRO_FADE_ON_PAUSE] = updated.microFadeOnPause
+            prefs[Keys.SHUFFLE_MODE] = updated.shuffleMode.name
+            prefs[Keys.EQ_ENABLED] = updated.eqEnabled
+            prefs[Keys.ACTIVE_EQ_PROFILE_ID] = updated.activeEqProfileId
+            prefs[Keys.CUSTOM_EQ_PROFILES_JSON] = prefsJson.encodeToString(updated.customEqProfiles)
+            prefs[Keys.BT_EQ_ASSIGNMENTS_JSON] = prefsJson.encodeToString(updated.bluetoothEqAssignments)
+            prefs[Keys.LYRICS_SHOW_ORIGINAL] = updated.lyricsShowOriginal
+            prefs[Keys.LYRICS_SHOW_ROMANIZED] = updated.lyricsShowRomanized
+            prefs[Keys.LYRICS_SHOW_TRANSLATION] = updated.lyricsShowTranslation
+            prefs[Keys.LYRICS_TRANSLATION_LANG] = updated.lyricsTranslationLanguage
         }
     }
 }

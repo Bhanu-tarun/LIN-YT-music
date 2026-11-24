@@ -44,22 +44,19 @@ object InnerTubeParsers {
     fun parseHomeResponse(root: JsonObject): HomePage {
         val sectionContents = root.findFirstArray("sectionListRenderer", "contents")
             ?: root.findFirstArray("continuationContents", "sectionListContinuation", "contents")
+            ?: root.findFirstArray("appendContinuationItemsAction", "continuationItems")
             ?: JsonArray(emptyList())
 
-        val sections = sectionContents.mapNotNull { elem ->
+        val unwrapped = sectionContents.flatMap { elem ->
+            elem.asObj()?.obj("itemSectionRenderer")?.arr("contents")?.toList() ?: listOf(elem)
+        }
+
+        val sections = unwrapped.mapNotNull { elem ->
             val obj = elem.asObj() ?: return@mapNotNull null
-            val carousel = obj.obj("musicCarouselShelfRenderer")
-            if (carousel != null) {
-                parseCarouselSection(carousel)
-            } else {
-                val grid = obj.obj("gridRenderer")
-                if (grid != null) {
-                    parseGridSection(grid)
-                } else {
-                    val shelf = obj.obj("musicShelfRenderer")
-                    if (shelf != null) parseMusicShelfAsHomeSection(shelf) else null
-                }
-            }
+            obj.obj("musicCarouselShelfRenderer")?.let { parseCarouselSection(it) }
+                ?: obj.obj("musicImmersiveCarouselShelfRenderer")?.let { parseCarouselSection(it) }
+                ?: obj.obj("gridRenderer")?.let { parseGridSection(it) }
+                ?: obj.obj("musicShelfRenderer")?.let { parseMusicShelfAsHomeSection(it) }
         }
 
         val continuation = root.extractContinuationToken()
@@ -67,10 +64,10 @@ object InnerTubeParsers {
     }
 
     private fun parseCarouselSection(carousel: JsonObject): HomeSection? {
-        val title = carousel.obj("header")
+        val header = carousel.obj("header")
             ?.obj("musicCarouselShelfBasicHeaderRenderer")
-            ?.obj("title")
-            ?.extractText()
+        val title = header?.obj("title")?.extractText()
+            ?: header?.obj("strapline")?.extractText()
             ?: return null
         val contents = carousel.arr("contents") ?: return null
         val items = contents.mapNotNull { itemElem ->
@@ -116,8 +113,10 @@ object InnerTubeParsers {
     }
 
     private fun parseTwoRowHomeItem(renderer: JsonObject): HomeItem? {
-        val browseEndpoint = renderer.obj("navigationEndpoint")?.obj("browseEndpoint")
-        val watchEndpoint = renderer.obj("navigationEndpoint")?.obj("watchEndpoint")
+        val navEndpoint = renderer.obj("navigationEndpoint")
+        val browseEndpoint = navEndpoint?.obj("browseEndpoint")
+        val watchEndpoint = navEndpoint?.obj("watchEndpoint")
+        val watchPlaylistEndpoint = navEndpoint?.obj("watchPlaylistEndpoint")
         val title = renderer.obj("title")?.extractText() ?: return null
         val subtitleRuns = renderer.obj("subtitle")?.arr("runs")
         val subtitle = renderer.obj("subtitle")?.extractText()
@@ -126,14 +125,14 @@ object InnerTubeParsers {
             ?.obj("thumbnail")
             ?.extractThumbnailUrl()
 
-        if (watchEndpoint != null) {
-            val videoId = watchEndpoint.str("videoId") ?: return null
+        val watchVideoId = watchEndpoint?.str("videoId")?.takeIf { it.isNotBlank() }
+        if (watchVideoId != null) {
             val artists = subtitleRuns.extractArtistsFromRuns()
             val (addToken, removeToken, inLib) = extractLibraryTokens(renderer)
             val isLiked = extractLikeState(renderer)
             return HomeItem.SongItem(
                 Track(
-                    videoId = videoId,
+                    videoId = watchVideoId,
                     title = title,
                     artists = artists,
                     thumbnailUrl = thumb,
@@ -141,6 +140,28 @@ object InnerTubeParsers {
                     isLiked = isLiked,
                     feedbackTokenAdd = addToken,
                     feedbackTokenRemove = removeToken
+                )
+            )
+        }
+
+        val overlayPlayNav = renderer.obj("thumbnailOverlay")
+            ?.obj("musicItemThumbnailOverlayRenderer")
+            ?.obj("content")
+            ?.obj("musicPlayButtonRenderer")
+            ?.obj("playNavigationEndpoint")
+        val watchPlaylistId = watchPlaylistEndpoint?.str("playlistId")?.takeIf { it.isNotBlank() }
+            ?: watchEndpoint?.str("playlistId")?.takeIf { it.isNotBlank() }
+            ?: overlayPlayNav?.obj("watchPlaylistEndpoint")?.str("playlistId")?.takeIf { it.isNotBlank() }
+            ?: overlayPlayNav?.obj("watchEndpoint")?.str("playlistId")?.takeIf { it.isNotBlank() }
+        if (browseEndpoint == null && watchPlaylistId != null) {
+            val cleanId = watchPlaylistId.removePrefix("VL")
+            return HomeItem.PlaylistItem(
+                PlaylistSummary(
+                    id = cleanId,
+                    browseId = if (watchPlaylistId.startsWith("VL")) watchPlaylistId else "VL$cleanId",
+                    title = title,
+                    subtitle = subtitle,
+                    thumbnailUrl = thumb
                 )
             )
         }
@@ -699,13 +720,16 @@ object InnerTubeParsers {
             )
         }
 
-        val continuation = root.findFirstObject("playlistPanelRenderer")
+        val panel = root.findFirstObject("playlistPanelRenderer")
+        val continuation = panel
             ?.arr("continuations")
             ?.firstOrNull()?.asObj()
             ?.obj("nextRadioContinuationData")?.str("continuation")
             ?: root.extractContinuationToken()
 
-        val playlistId = root.findFirstObject("playlistPanelRenderer")?.str("playlistId")
+        val playlistId = panel?.str("playlistId")
+        val playlistTitle = panel?.str("title")?.takeIf { it.isNotBlank() }
+            ?: panel?.obj("title")?.extractText()?.takeIf { it.isNotBlank() }
 
         return NextPage(
             tracks = dedupedQueue,
@@ -714,7 +738,8 @@ object InnerTubeParsers {
             continuation = continuation,
             lyricsBrowseId = lyricsBrowseId,
             relatedBrowseId = relatedBrowseId,
-            mixChips = mixChips
+            mixChips = mixChips,
+            playlistTitle = playlistTitle
         )
     }
 

@@ -315,4 +315,41 @@ object LinIcons {
             moveTo(10f, 16f); lineTo(10f, 20f)
         }
     }
+
+    val Equalizer: ImageVector by lazy {
+        buildIcon("Equalizer") {
+            moveTo(4f, 20f); lineTo(4f, 10f)
+            moveTo(9f, 20f); lineTo(9f, 4f)
+            moveTo(14f, 20f); lineTo(14f, 13f)
+            moveTo(19f, 20f); lineTo(19f, 7f)
+        }
+    }
+
+    val BarChart: ImageVector by lazy {
+        buildIcon("BarChart") {
+            moveTo(3f, 20f); lineTo(21f, 20f)
+            moveTo(6f, 20f); lineTo(6f, 12f)
+            moveTo(11f, 20f); lineTo(11f, 6f)
+            moveTo(16f, 20f); lineTo(16f, 9f)
+        }
+    }
+
+    val Driving: ImageVector by lazy {
+        buildIcon("Driving") {
+            moveTo(12f, 3f); arcTo(9f, 9f, 0f, true, true, 11.99f, 3f)
+            moveTo(12f, 10f); arcTo(2f, 2f, 0f, true, true, 11.99f, 10f)
+            moveTo(5f, 11f); lineTo(10f, 11f)
+            moveTo(14f, 11f); lineTo(19f, 11f)
+            moveTo(12f, 14f); lineTo(12f, 21f)
+        }
+    }
+
+    val Offline: ImageVector by lazy {
+        buildIcon("Offline") {
+            moveTo(2f, 2f); lineTo(22f, 22f)
+            moveTo(8.5f, 16.5f); lineTo(12f, 20f); lineTo(15.5f, 16.5f)
+            moveTo(5f, 13f); lineTo(12f, 13f)
+            moveTo(16f, 9f); lineTo(20f, 9f)
+        }
+    }
 }

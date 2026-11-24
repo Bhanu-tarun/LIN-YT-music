@@ -24,9 +24,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -34,7 +36,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,6 +62,7 @@ import com.lin.music.core.designsystem.components.LinTrackArtHoverOverlay
 import com.lin.music.core.designsystem.components.PreloadPreviewArtworks
 import com.lin.music.core.designsystem.components.SwipeableTrackRow
 import com.lin.music.core.designsystem.components.highResArtworkUrl
+import com.lin.music.core.designsystem.components.rememberMultiTapCoordinator
 import com.lin.music.core.designsystem.icons.LinIcons
 import com.lin.music.core.designsystem.sheets.LinUnderlineTextField
 import com.lin.music.core.designsystem.sheets.PlaylistEditorDialog
@@ -68,11 +73,11 @@ import com.lin.music.core.designsystem.theme.linBrandText
 import com.lin.music.core.designsystem.theme.linLabel
 import com.lin.music.core.model.AlbumDetail
 import com.lin.music.core.model.ArtistDetail
+import com.lin.music.core.model.DuplicateTrackFinder
 import com.lin.music.core.model.PlaylistDetail
 import com.lin.music.core.model.Track
 import com.lin.music.ui.EditablePlaylistContext
 import com.lin.music.ui.SortOption
-import com.lin.music.util.ShareHelper
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -98,12 +103,14 @@ fun AlbumDetailScreen(
     onPreviewTrack: (Track) -> Unit = {},
     isPinnedToSpeedDial: Boolean = false,
     onTogglePinSpeedDial: (() -> Unit)? = null,
+    onShareAlbum: (AlbumDetail) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
     val context = LocalContext.current
     var filterQuery by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val tapCoordinator = rememberMultiTapCoordinator()
     var previewedKey by remember { mutableStateOf<String?>(null) }
     var previewArtUrl by remember { mutableStateOf<String?>(null) }
     var previewCenterYPx by remember { mutableFloatStateOf(0f) }
@@ -111,7 +118,10 @@ fun AlbumDetailScreen(
     var viewportHeightPx by remember { mutableFloatStateOf(1200f) }
 
     LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) previewedKey = null
+        if (listState.isScrollInProgress) {
+            previewedKey = null
+            tapCoordinator.cancel()
+        }
     }
 
     val visibleAlbumTracks = remember(album?.tracks, filterQuery) {
@@ -127,7 +137,7 @@ fun AlbumDetailScreen(
         buildList {
             album?.thumbnailUrl?.let { add(it) }
             val start = firstVisibleTrackIdx
-            val end = (start + 8).coerceAtMost(visibleAlbumTracks.size)
+            val end = (start + 14).coerceAtMost(visibleAlbumTracks.size)
             for (i in start until end) {
                 add(visibleAlbumTracks[i].thumbnailUrl ?: album?.thumbnailUrl)
             }
@@ -250,9 +260,7 @@ fun AlbumDetailScreen(
                         }
                         LinOutlinedButton(
                             text = "share",
-                            onClick = {
-                                ShareHelper.shareText(context, "${data.title} — ${data.artistDisplay}\n${ShareHelper.albumUrl(data.browseId)}", data.title)
-                            }
+                            onClick = { onShareAlbum(data) }
                         )
                     }
 
@@ -275,7 +283,10 @@ fun AlbumDetailScreen(
                     accentColor = accentColor,
                     isDownloaded = downloadMap[track.videoId] == 2,
                     showThumbnail = false,
+                    hideThumbnail = previewedKey != null,
                     isPreviewed = previewedKey == rowKey,
+                    tapCoordinator = tapCoordinator,
+                    rowKey = rowKey,
                     onClick = {
                         if (previewedKey == rowKey) {
                             previewedKey = null
@@ -289,6 +300,10 @@ fun AlbumDetailScreen(
                     onDoubleClick = {
                         previewedKey = null
                         onPlayTracks(visibleAlbumTracks, idx, data.title)
+                    },
+                    onTripleClick = {
+                        previewedKey = null
+                        onStartMix(track)
                     },
                     onSwipeRightPlayNext = { onSwipeRightPlayNext(track) },
                     onSwipeLeftAddToQueue = { onSwipeLeftAddToQueue(track) },
@@ -348,6 +363,7 @@ fun PlaylistDetailScreen(
     onPlayTracks: (List<Track>, Int, String) -> Unit,
     onShuffle: (List<Track>, String) -> Unit,
     onStartMix: (String, String) -> Unit,
+    onStartMixForTrack: (Track) -> Unit = {},
     onDownloadAll: (List<Track>) -> Unit,
     onToggleSaveLibrary: () -> Unit,
     onCloneToEditable: () -> Unit,
@@ -363,17 +379,34 @@ fun PlaylistDetailScreen(
     onPreviewTrack: (Track) -> Unit = {},
     isPinnedToSpeedDial: Boolean = false,
     onTogglePinSpeedDial: (() -> Unit)? = null,
+    onToggleAutoDownload: ((Boolean) -> Unit)? = null,
+    onRemoveDuplicates: (suspend (Set<Int>) -> Int)? = null,
+    onBatchPlayNext: ((List<Track>) -> Unit)? = null,
+    onBatchAddToQueue: ((List<Track>) -> Unit)? = null,
+    onBatchDownload: ((List<Track>) -> Unit)? = null,
+    onSharePlaylist: (PlaylistDetail) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var filterQuery by remember { mutableStateOf("") }
     var sortOption by remember { mutableStateOf(SortOption.CUSTOM) }
     var showEditDialog by remember { mutableStateOf(false) }
     var showAddSongs by remember { mutableStateOf(false) }
+    var showDuplicateDialog by remember { mutableStateOf(false) }
     var addSongSearch by remember { mutableStateOf("") }
     var reorderMode by remember { mutableStateOf(false) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedRowKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val duplicateGroups = remember(playlist?.tracks) {
+        DuplicateTrackFinder.findDuplicates(playlist?.tracks.orEmpty())
+    }
+    val totalDuplicateCount = remember(duplicateGroups) {
+        duplicateGroups.sumOf { it.duplicateIndices.size }
+    }
     val listState = rememberLazyListState()
+    val tapCoordinator = rememberMultiTapCoordinator()
     var previewedKey by remember { mutableStateOf<String?>(null) }
     var previewArtUrl by remember { mutableStateOf<String?>(null) }
     var previewCenterYPx by remember { mutableFloatStateOf(0f) }
@@ -381,7 +414,10 @@ fun PlaylistDetailScreen(
     var viewportHeightPx by remember { mutableFloatStateOf(1200f) }
 
     LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) previewedKey = null
+        if (listState.isScrollInProgress) {
+            previewedKey = null
+            tapCoordinator.cancel()
+        }
     }
 
     val processed = remember(playlist?.tracks, filterQuery, sortOption) {
@@ -402,7 +438,7 @@ fun PlaylistDetailScreen(
         buildList {
             playlist?.thumbnailUrl?.let { add(it) }
             val start = firstVisibleTrackIdx
-            val end = (start + 8).coerceAtMost(processed.size)
+            val end = (start + 14).coerceAtMost(processed.size)
             for (i in start until end) {
                 add(processed[i].thumbnailUrl ?: playlist?.thumbnailUrl)
             }
@@ -554,6 +590,18 @@ fun PlaylistDetailScreen(
                                     LinOutlinedButton("copy to edit", onClick = onCloneToEditable)
                                 }
                             }
+                            if (onToggleAutoDownload != null) {
+                                LinOutlinedButton(
+                                    text = if (data.autoDownload) "keep offline ✓" else "keep offline",
+                                    onClick = { onToggleAutoDownload(!data.autoDownload) }
+                                )
+                            }
+                            if (isOwnedEditable && totalDuplicateCount > 0 && onRemoveDuplicates != null) {
+                                LinOutlinedButton(
+                                    text = "dedup ($totalDuplicateCount)",
+                                    onClick = { showDuplicateDialog = true }
+                                )
+                            }
                             if (onTogglePinSpeedDial != null) {
                                 LinOutlinedButton(
                                     text = if (isPinnedToSpeedDial) "pinned ✓" else "pin",
@@ -562,7 +610,70 @@ fun PlaylistDetailScreen(
                             }
                             LinOutlinedButton(
                                 text = "share",
-                                onClick = { ShareHelper.shareText(context, "${data.title}\n${ShareHelper.playlistUrl(data.id)}", data.title) }
+                                onClick = { onSharePlaylist(data) }
+                            )
+                        }
+                        if (data.tracks.isNotEmpty()) {
+                            LinOutlinedButton(
+                                text = if (selectionMode) "done (${selectedRowKeys.size})" else "select",
+                                onClick = {
+                                    selectionMode = !selectionMode
+                                    if (!selectionMode) selectedRowKeys = emptySet()
+                                }
+                            )
+                        }
+                    }
+
+                    if (selectionMode && processed.isNotEmpty()) {
+                        val selectedTracks = processed.mapIndexedNotNull { idx, t ->
+                            val rk = "${idx}_${t.videoId}_${t.setVideoId ?: ""}"
+                            if (rk in selectedRowKeys) t else null
+                        }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(linColors.glassBg)
+                                .border(1.dp, linColors.glassBorder, LinSharpShape)
+                                .padding(10.dp)
+                        ) {
+                            LinOutlinedButton(
+                                text = "play next (${selectedTracks.size})",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchPlayNext?.invoke(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = "+ queue",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchAddToQueue?.invoke(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = "download",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchDownload?.invoke(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = if (selectedTracks.size == processed.size) "none" else "all",
+                                onClick = {
+                                    selectedRowKeys = if (selectedTracks.size == processed.size) {
+                                        emptySet()
+                                    } else {
+                                        processed.mapIndexed { idx, t -> "${idx}_${t.videoId}_${t.setVideoId ?: ""}" }.toSet()
+                                    }
+                                }
                             )
                         }
                     }
@@ -643,7 +754,19 @@ fun PlaylistDetailScreen(
                         accentColor = accentColor,
                         isDownloaded = downloadMap[track.videoId] == 2,
                         showThumbnail = false,
+                        hideThumbnail = previewedKey != null,
                         isPreviewed = previewedKey == rowKey,
+                        tapCoordinator = tapCoordinator,
+                        rowKey = rowKey,
+                        selectionMode = selectionMode,
+                        isSelected = rowKey in selectedRowKeys,
+                        onToggleSelect = {
+                            selectedRowKeys = if (rowKey in selectedRowKeys) {
+                                selectedRowKeys - rowKey
+                            } else {
+                                selectedRowKeys + rowKey
+                            }
+                        },
                         onClick = {
                             if (previewedKey == rowKey) {
                                 previewedKey = null
@@ -657,6 +780,10 @@ fun PlaylistDetailScreen(
                         onDoubleClick = {
                             previewedKey = null
                             onPlayTracks(processed, idx, data.title)
+                        },
+                        onTripleClick = {
+                            previewedKey = null
+                            onStartMixForTrack(track)
                         },
                         onSwipeRightPlayNext = { onSwipeRightPlayNext(track) },
                         onSwipeLeftAddToQueue = { onSwipeLeftAddToQueue(track) },
@@ -715,6 +842,57 @@ fun PlaylistDetailScreen(
             }
         )
     }
+
+    if (showDuplicateDialog && playlist != null) {
+        AlertDialog(
+            onDismissRequest = { showDuplicateDialog = false },
+            containerColor = linColors.background,
+            title = {
+                Text(
+                    text = linLabel("remove $totalDuplicateCount duplicate(s)?"),
+                    style = LinTextStyles.sectionHeading,
+                    color = linColors.textPrimary
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    duplicateGroups.take(6).forEach { group ->
+                        val first = group.tracks.firstOrNull()
+                        Text(
+                            text = "• ${first?.title.orEmpty()} (${group.reason} · ${group.duplicateIndices.size} extra)",
+                            style = LinTextStyles.subtitle,
+                            color = linColors.textSecondary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (duplicateGroups.size > 6) {
+                        Text(
+                            text = "...and ${duplicateGroups.size - 6} more group(s)",
+                            style = LinTextStyles.subtitle,
+                            color = linColors.textSecondary
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val dupeSet = duplicateGroups.flatMap { it.duplicateIndices }.toSet()
+                    scope.launch {
+                        onRemoveDuplicates?.invoke(dupeSet)
+                        showDuplicateDialog = false
+                    }
+                }) {
+                    Text(linLabel("remove duplicates"), color = accentColor)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDuplicateDialog = false }) {
+                    Text(linLabel("cancel"), color = linColors.textSecondary)
+                }
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -738,10 +916,10 @@ fun ArtistDetailScreen(
     onTrackMore: (Track) -> Unit,
     isPinnedToSpeedDial: Boolean = false,
     onTogglePinSpeedDial: (() -> Unit)? = null,
+    onShareArtist: (ArtistDetail) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
-    val context = LocalContext.current
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -817,9 +995,7 @@ fun ArtistDetailScreen(
                             onClick = onTogglePinSpeedDial
                         )
                     }
-                    LinOutlinedButton("share", onClick = {
-                        ShareHelper.shareText(context, "${data.name}\n${ShareHelper.artistUrl(data.browseId)}", data.name)
-                    })
+                    LinOutlinedButton("share", onClick = { onShareArtist(data) })
                 }
             }
         }

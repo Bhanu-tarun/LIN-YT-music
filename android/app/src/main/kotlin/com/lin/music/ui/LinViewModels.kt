@@ -1,6 +1,8 @@
 package com.lin.music.ui
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -27,16 +29,23 @@ import com.lin.music.core.model.ArtistDetail
 import com.lin.music.core.model.ArtistRef
 import com.lin.music.core.model.ArtistSortOrder
 import com.lin.music.core.model.AudioQuality
+import com.lin.music.core.model.AutoEqParser
+import com.lin.music.core.model.BluetoothEqAssignment
 import com.lin.music.core.model.ContentRegions
+import com.lin.music.core.model.EqualizerProfile
 import com.lin.music.core.model.HomeItem
 import com.lin.music.core.model.HomeSection
+import com.lin.music.core.model.ListeningStatsSummary
 import com.lin.music.core.model.LyricsResult
+import com.lin.music.core.model.LyricsSearchCandidate
 import com.lin.music.core.model.PlaylistDetail
 import com.lin.music.core.model.PlaylistSummary
 import com.lin.music.core.model.SearchFilter
 import com.lin.music.core.model.SearchResultPage
+import com.lin.music.core.model.ShuffleMode
 import com.lin.music.core.model.SongSortOrder
 import com.lin.music.core.model.SpeedDialEntry
+import com.lin.music.core.model.StatsRange
 import com.lin.music.core.model.Track
 import com.lin.music.core.model.TrackArtworkPalette
 import com.lin.music.core.model.UserPreferences
@@ -47,17 +56,20 @@ import com.lin.music.core.playback.download.SmartDownloadManager
 import com.lin.music.core.playback.queue.PlayerController
 import com.lin.music.core.playback.queue.QueueSnapshot
 import com.lin.music.core.playback.queue.QueueUndoToken
+import com.lin.music.util.LinShareCardRenderer
 import com.lin.music.util.ShareHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -96,6 +108,8 @@ sealed interface DetailRoute {
     data class LocalPlaylist(val kind: LocalDownloadPlaylistKind) : DetailRoute
     data class Artist(val browseId: String) : DetailRoute
     data object Settings : DetailRoute
+    data object Stats : DetailRoute
+    data object Equalizer : DetailRoute
 }
 
 data class LinToastMessage(
@@ -205,6 +219,31 @@ class MainViewModel @Inject constructor(
     private val _lyricsLoading = MutableStateFlow(false)
     val lyricsLoading: StateFlow<Boolean> = _lyricsLoading.asStateFlow()
 
+    private val _lyricsSearchResults = MutableStateFlow<List<LyricsSearchCandidate>>(emptyList())
+    val lyricsSearchResults: StateFlow<List<LyricsSearchCandidate>> = _lyricsSearchResults.asStateFlow()
+
+    private val _lyricsSearching = MutableStateFlow(false)
+    val lyricsSearching: StateFlow<Boolean> = _lyricsSearching.asStateFlow()
+
+    private val _translatedLyricsLines = MutableStateFlow<List<String>>(emptyList())
+    val translatedLyricsLines: StateFlow<List<String>> = _translatedLyricsLines.asStateFlow()
+
+    private val _translatingLyrics = MutableStateFlow(false)
+    val translatingLyrics: StateFlow<Boolean> = _translatingLyrics.asStateFlow()
+
+    private val _showDrivingMode = MutableStateFlow(false)
+    val showDrivingMode: StateFlow<Boolean> = _showDrivingMode.asStateFlow()
+
+    private val _statsRange = MutableStateFlow(StatsRange.SEVEN_DAYS)
+    val statsRange: StateFlow<StatsRange> = _statsRange.asStateFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val listeningStats: StateFlow<ListeningStatsSummary> = _statsRange
+        .flatMapLatest { repository.observeListeningStats(it) }
+        .stateIn(viewModelScope, SharingStarted.Lazily, ListeningStatsSummary(StatsRange.SEVEN_DAYS))
+
+    val activeOutputDevice: StateFlow<Pair<String, String>?> = playerController.activeOutputDevice
+
     private val _relatedSections = MutableStateFlow<List<HomeSection>>(emptyList())
     val relatedSections: StateFlow<List<HomeSection>> = _relatedSections.asStateFlow()
 
@@ -239,6 +278,9 @@ class MainViewModel @Inject constructor(
                     loadedLyricsVideoId = null
                     loadedRelatedVideoId = null
                     _lyricsResult.value = null
+                    _lyricsSearchResults.value = emptyList()
+                    _translatedLyricsLines.value = emptyList()
+                    _translatingLyrics.value = false
                     _relatedSections.value = emptyList()
                     _lyricsLoading.value = false
                     if (track != null) {
@@ -285,6 +327,12 @@ class MainViewModel @Inject constructor(
                         syncAccount(force = false)
                     }
                 }
+        }
+        syncOfflineModeWithStartupConnectivity()
+        viewModelScope.launch {
+            playerController.isCarConnected.collect { connected ->
+                _showDrivingMode.value = connected
+            }
         }
     }
 
@@ -416,8 +464,223 @@ class MainViewModel @Inject constructor(
         loadedLyricsVideoId = track.videoId
         lyricsJob = viewModelScope.launch {
             _lyricsLoading.value = true
-            _lyricsResult.value = runCatching { repository.getLyrics(track) }.getOrNull()
+            val res = runCatching { repository.getLyrics(track) }.getOrNull()
+            _lyricsResult.value = res
             _lyricsLoading.value = false
+            if (res != null && preferences.value.lyricsShowTranslation) {
+                translateCurrentLyricsIfNeeded(res)
+            }
+        }
+    }
+
+    fun selectStatsRange(range: StatsRange) {
+        _statsRange.value = range
+    }
+
+    fun openDrivingMode() {
+        _showDrivingMode.value = true
+    }
+
+    fun closeDrivingMode() {
+        _showDrivingMode.value = false
+    }
+
+    fun toggleOfflineMode() {
+        viewModelScope.launch {
+            val next = !preferences.value.offlineMode
+            preferencesStore.setOfflineModeAutoEnabled(false)
+            preferencesStore.update { it.copy(offlineMode = next) }
+            showToast(if (next) "offline mode on — local library & downloads only" else "offline mode off")
+            if (!next) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    runCatching { smartDownloadManager.syncAll(force = false) }
+                }
+            }
+        }
+    }
+
+    private fun syncOfflineModeWithStartupConnectivity() {
+        viewModelScope.launch {
+            val hasInternet = hasValidatedInternet()
+            val prefs = preferencesStore.preferencesFlow.first()
+            val wasAuto = preferencesStore.wasOfflineModeAutoEnabled()
+            if (!hasInternet) {
+                if (!prefs.offlineMode) {
+                    preferencesStore.setOfflineModeAutoEnabled(true)
+                    preferencesStore.update { it.copy(offlineMode = true) }
+                    showToast("no internet — offline mode on")
+                }
+            } else if (wasAuto) {
+                preferencesStore.setOfflineModeAutoEnabled(false)
+                if (prefs.offlineMode) {
+                    preferencesStore.update { it.copy(offlineMode = false) }
+                    viewModelScope.launch(Dispatchers.IO) {
+                        runCatching { smartDownloadManager.syncAll(force = false) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hasValidatedInternet(): Boolean {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return true
+        val active = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(active) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    fun adjustLyricsOffset(deltaMs: Long) {
+        val current = _lyricsResult.value ?: return
+        val nextOffset = (current.syncOffsetMs + deltaMs).coerceIn(-5000L, 5000L)
+        _lyricsResult.value = current.copy(syncOffsetMs = nextOffset)
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.updateLyricsSyncOffset(current.videoId, nextOffset) }
+        }
+    }
+
+    fun resetLyricsOffset() {
+        val current = _lyricsResult.value ?: return
+        _lyricsResult.value = current.copy(syncOffsetMs = 0L)
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { repository.updateLyricsSyncOffset(current.videoId, 0L) }
+        }
+    }
+
+    fun searchLyricsCandidates(query: String) {
+        viewModelScope.launch {
+            _lyricsSearching.value = true
+            _lyricsSearchResults.value = runCatching { repository.searchLyrics(query) }.getOrDefault(emptyList())
+            _lyricsSearching.value = false
+        }
+    }
+
+    fun applyLyricsCandidate(candidate: LyricsSearchCandidate) {
+        val track = playerController.queueSnapshot.value.currentTrack ?: return
+        viewModelScope.launch {
+            val updated = runCatching { repository.selectCustomLyrics(track.videoId, candidate) }.getOrNull()
+            if (updated != null) {
+                _lyricsResult.value = updated
+                _translatedLyricsLines.value = emptyList()
+                if (preferences.value.lyricsShowTranslation) {
+                    translateCurrentLyricsIfNeeded(updated)
+                }
+                showToast("updated lyrics for ${track.title}")
+            }
+        }
+    }
+
+    fun setLyricsDisplayFlags(
+        showOriginal: Boolean = preferences.value.lyricsShowOriginal,
+        showRomanized: Boolean = preferences.value.lyricsShowRomanized,
+        showTranslation: Boolean = preferences.value.lyricsShowTranslation
+    ) {
+        viewModelScope.launch {
+            preferencesStore.update {
+                it.copy(
+                    lyricsShowOriginal = showOriginal,
+                    lyricsShowRomanized = showRomanized,
+                    lyricsShowTranslation = showTranslation
+                )
+            }
+            if (showTranslation) {
+                _lyricsResult.value?.let { translateCurrentLyricsIfNeeded(it) }
+            }
+        }
+    }
+
+    private fun translateCurrentLyricsIfNeeded(lyrics: LyricsResult) {
+        val lines = if (lyrics.syncedLines.isNotEmpty()) {
+            lyrics.syncedLines.map { it.text }
+        } else {
+            lyrics.plainText?.lines().orEmpty()
+        }
+        if (lines.isEmpty()) return
+        if (_translatedLyricsLines.value.size == lines.size && _translatedLyricsLines.value.any { it.isNotBlank() }) return
+        if (preferences.value.offlineMode) return
+        viewModelScope.launch {
+            _translatingLyrics.value = true
+            val lang = preferences.value.lyricsTranslationLanguage.ifBlank { "en" }
+            val translated = runCatching { repository.translateLyrics(lines, lang) }.getOrDefault(emptyList())
+            if (_lyricsResult.value?.videoId == lyrics.videoId && translated.isNotEmpty()) {
+                _translatedLyricsLines.value = translated
+            }
+            _translatingLyrics.value = false
+        }
+    }
+
+    fun shareLyricsCard(
+        track: Track,
+        selectedLines: List<String>,
+        romanizedLines: List<String?>,
+        accentColorInt: Int,
+        launcherContext: Context = context
+    ) {
+        viewModelScope.launch {
+            val uri = LinShareCardRenderer.renderLyricsCardUri(
+                context = context,
+                track = track,
+                selectedLines = selectedLines,
+                romanizedLines = romanizedLines,
+                accentColor = accentColorInt
+            )
+            if (uri != null) {
+                val ok = ShareHelper.shareImageUri(launcherContext, uri, "${track.title} · LIN Lyrics")
+                if (!ok) showToast("could not open share sheet")
+            } else {
+                showToast("could not render lyrics card")
+            }
+        }
+    }
+
+    fun shareStatsCard(accentColorInt: Int, launcherContext: Context = context) {
+        viewModelScope.launch {
+            val uri = LinShareCardRenderer.renderStatsCardUri(
+                context = context,
+                summary = listeningStats.value,
+                accentColor = accentColorInt
+            )
+            if (uri != null) {
+                val ok = ShareHelper.shareImageUri(launcherContext, uri, "LIN Stats")
+                if (!ok) showToast("could not open share sheet")
+            } else {
+                showToast("could not render stats card")
+            }
+        }
+    }
+
+    fun batchPlayNext(tracks: List<Track>, label: String) {
+        if (tracks.isEmpty()) return
+        val undo = playerController.playNextAll(tracks, label)
+        showToast(undo.description, "undo") { playerController.undoQueueChange(undo) }
+    }
+
+    fun batchAddToQueue(tracks: List<Track>, label: String) {
+        if (tracks.isEmpty()) return
+        val undo = playerController.addAllToQueue(tracks, label)
+        showToast(undo.description, "undo") { playerController.undoQueueChange(undo) }
+    }
+
+    fun batchDownload(tracks: List<Track>) {
+        if (tracks.isEmpty()) return
+        downloadController.downloadAll(tracks)
+        showToast("queued ${tracks.size} tracks for download")
+    }
+
+    fun batchDeleteDownloads(tracks: List<Track>) {
+        if (tracks.isEmpty()) return
+        tracks.forEach { downloadController.removeDownload(it.videoId) }
+        showToast("removed ${tracks.size} downloads")
+    }
+
+    fun batchAddToPlaylist(playlist: PlaylistSummary, tracks: List<Track>) {
+        if (tracks.isEmpty()) return
+        viewModelScope.launch {
+            var added = 0
+            tracks.forEach { t ->
+                if (repository.addTrackToPlaylist(playlist.id, t).isSuccess) added++
+            }
+            showToast("added $added track(s) to ${playlist.title}")
         }
     }
 
@@ -588,6 +851,10 @@ class MainViewModel @Inject constructor(
     }
 
     fun startMixForTrack(track: Track) {
+        if (preferences.value.offlineMode) {
+            showToast("mix unavailable in offline mode")
+            return
+        }
         _isPlayerExpanded.value = true
         playerController.startMix(
             seedVideoId = track.videoId,
@@ -790,8 +1057,135 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch { repository.removeTag(target.itemId, target.itemType, tag) }
     }
 
-    fun shareTrack(track: Track, timestampSec: Long? = null) {
-        ShareHelper.shareTrack(context, track, timestampSec)
+    fun shareTrack(
+        track: Track,
+        timestampSec: Long? = null,
+        accentColorInt: Int = 0xFFE85D04.toInt(),
+        launcherContext: Context = context
+    ) {
+        val url = ShareHelper.trackUrl(track.videoId, timestampSec)
+        val caption = "${track.title} — ${track.artistDisplay}\n$url"
+        viewModelScope.launch {
+            val uri = LinShareCardRenderer.renderTrackCardUri(
+                context = context,
+                track = track,
+                accentColor = accentColorInt,
+                timestampSec = timestampSec
+            )
+            val sharedCard = uri != null && ShareHelper.shareImageUri(
+                context = launcherContext,
+                uri = uri,
+                title = track.title,
+                text = caption
+            )
+            if (!sharedCard) {
+                ShareHelper.shareText(launcherContext, caption, track.title)
+            }
+        }
+    }
+
+    fun shareAlbum(
+        album: AlbumDetail,
+        accentColorInt: Int = 0xFFE85D04.toInt(),
+        launcherContext: Context = context
+    ) {
+        val url = ShareHelper.albumUrl(album.browseId)
+        val header = listOfNotNull(
+            album.title.takeIf { it.isNotBlank() },
+            album.artistDisplay.takeIf { it.isNotBlank() }
+        ).joinToString(" — ")
+        val caption = "$header\n$url"
+        viewModelScope.launch {
+            val uri = LinShareCardRenderer.renderAlbumCardUri(
+                context = context,
+                album = album,
+                accentColor = accentColorInt
+            )
+            val sharedCard = uri != null && ShareHelper.shareImageUri(
+                context = launcherContext,
+                uri = uri,
+                title = album.title,
+                text = caption
+            )
+            if (!sharedCard) {
+                ShareHelper.shareText(launcherContext, caption, album.title)
+            }
+        }
+    }
+
+    fun sharePlaylist(
+        playlist: PlaylistDetail,
+        accentColorInt: Int = 0xFFE85D04.toInt(),
+        launcherContext: Context = context
+    ) {
+        val url = ShareHelper.playlistUrl(playlist.id)
+        val caption = "${playlist.title}\n$url"
+        viewModelScope.launch {
+            val uri = LinShareCardRenderer.renderPlaylistCardUri(
+                context = context,
+                playlist = playlist,
+                accentColor = accentColorInt
+            )
+            val sharedCard = uri != null && ShareHelper.shareImageUri(
+                context = launcherContext,
+                uri = uri,
+                title = playlist.title,
+                text = caption
+            )
+            if (!sharedCard) {
+                ShareHelper.shareText(launcherContext, caption, playlist.title)
+            }
+        }
+    }
+
+    fun sharePlaylistSummary(
+        playlist: PlaylistSummary,
+        accentColorInt: Int = 0xFFE85D04.toInt(),
+        launcherContext: Context = context
+    ) {
+        val url = ShareHelper.playlistUrl(playlist.id)
+        val caption = "${playlist.title}\n$url"
+        viewModelScope.launch {
+            val uri = LinShareCardRenderer.renderPlaylistSummaryCardUri(
+                context = context,
+                playlist = playlist,
+                accentColor = accentColorInt
+            )
+            val sharedCard = uri != null && ShareHelper.shareImageUri(
+                context = launcherContext,
+                uri = uri,
+                title = playlist.title,
+                text = caption
+            )
+            if (!sharedCard) {
+                ShareHelper.shareText(launcherContext, caption, playlist.title)
+            }
+        }
+    }
+
+    fun shareArtist(
+        artist: ArtistDetail,
+        accentColorInt: Int = 0xFFE85D04.toInt(),
+        launcherContext: Context = context
+    ) {
+        val url = ShareHelper.artistUrl(artist.browseId)
+        val caption = "${artist.name}\n$url"
+        viewModelScope.launch {
+            val uri = LinShareCardRenderer.renderArtistCardUri(
+                context = context,
+                artist = artist,
+                accentColor = accentColorInt
+            )
+            val sharedCard = uri != null && ShareHelper.shareImageUri(
+                context = launcherContext,
+                uri = uri,
+                title = artist.name,
+                text = caption
+            )
+            if (!sharedCard) {
+                ShareHelper.shareText(launcherContext, caption, artist.name)
+            }
+        }
     }
 
     fun saveQueueAsPlaylist(title: String) {
@@ -860,6 +1254,7 @@ class MainViewModel @Inject constructor(
 
 data class HomeUiState(
     val speedDialItems: List<SpeedDialEntry> = emptyList(),
+    val youtubeMixes: List<PlaylistSummary> = emptyList(),
     val userPlaylists: List<PlaylistSummary> = emptyList(),
     val quickPicks: List<Track> = emptyList(),
     val personalMixSections: List<HomeSection> = emptyList(),
@@ -869,6 +1264,7 @@ data class HomeUiState(
 ) {
     val isEmpty: Boolean
         get() = speedDialItems.isEmpty() &&
+            youtubeMixes.isEmpty() &&
             userPlaylists.isEmpty() &&
             quickPicks.isEmpty() &&
             personalMixSections.isEmpty() &&
@@ -877,6 +1273,7 @@ data class HomeUiState(
 
 private data class HomeFeedInputs(
     val sections: List<HomeSection>,
+    val dedicatedMixSections: List<HomeSection>,
     val playlists: List<PlaylistSummary>,
     val localSpeedDial: List<Track>,
     val pinnedEntries: List<SpeedDialEntry>
@@ -887,6 +1284,7 @@ class HomeViewModel @Inject constructor(
     private val repository: MusicRepository
 ) : ViewModel() {
     private val rawHomeSections = MutableStateFlow<List<HomeSection>>(emptyList())
+    private val dedicatedMixSections = MutableStateFlow<List<HomeSection>>(emptyList())
     private val _isLoading = MutableStateFlow(false)
     private val _error = MutableStateFlow<String?>(null)
     private var continuation: String? = null
@@ -894,17 +1292,20 @@ class HomeViewModel @Inject constructor(
     val uiState: StateFlow<HomeUiState> = combine(
         combine(
             rawHomeSections,
+            dedicatedMixSections,
             repository.observePlaylists(),
             repository.observeSpeedDialLocalTracks(),
-            repository.observeSpeedDialPins(),
-            ::HomeFeedInputs
-        ),
+            repository.observeSpeedDialPins()
+        ) { sections, mixSections, playlists, localSpeedDial, pins ->
+            HomeFeedInputs(sections, mixSections, playlists, localSpeedDial, pins)
+        },
         repository.observeHistoryTracks(),
         _isLoading,
         _error
     ) { feed, history, loading, err ->
         buildOrganizedHomeState(
             sections = feed.sections,
+            dedicatedMixSections = feed.dedicatedMixSections,
             userPlaylists = feed.playlists,
             localSpeedDial = feed.localSpeedDial,
             pinnedEntries = feed.pinnedEntries,
@@ -947,20 +1348,53 @@ class HomeViewModel @Inject constructor(
                     histJob.await()
                     homeJob.await()
                         .onSuccess { page ->
-                            rawHomeSections.value = page.sections
-                            continuation = page.continuation
+                            applyLoadedHomePage(page.sections, page.continuation)
                         }
                         .onFailure { _error.value = it.message ?: "Failed to load home feed" }
                 }
             } else {
                 runCatching { repository.getHome() }
                     .onSuccess { page ->
-                        rawHomeSections.value = page.sections
-                        continuation = page.continuation
+                        applyLoadedHomePage(page.sections, page.continuation)
                     }
                     .onFailure { _error.value = it.message ?: "Failed to load home feed" }
             }
             _isLoading.value = false
+        }
+    }
+
+    private suspend fun applyLoadedHomePage(
+        initialSections: List<HomeSection>,
+        initialContinuation: String?
+    ) {
+        var loadedSections = initialSections
+        var nextToken = initialContinuation
+        rawHomeSections.value = loadedSections
+        continuation = nextToken
+
+        runCatching { repository.getMixedForYou() }.onSuccess { page ->
+            dedicatedMixSections.value = page.sections
+        }
+
+        val seenTokens = mutableSetOf<String>()
+        var extraPages = 0
+        while (extractYoutubeMixes(loadedSections).first.isEmpty() &&
+            extractDedicatedMixes(dedicatedMixSections.value).isEmpty() &&
+            !nextToken.isNullOrBlank() &&
+            extraPages < MAX_MIX_CONTINUATION_PAGES &&
+            seenTokens.add(nextToken)
+        ) {
+            val contPage = runCatching { repository.getHome(nextToken) }.getOrNull() ?: break
+            if (contPage.sections.isEmpty()) {
+                nextToken = contPage.continuation
+                continuation = nextToken
+                break
+            }
+            loadedSections = loadedSections + contPage.sections
+            nextToken = contPage.continuation
+            rawHomeSections.value = loadedSections
+            continuation = nextToken
+            extraPages++
         }
     }
 
@@ -979,6 +1413,7 @@ class HomeViewModel @Inject constructor(
 
     private fun buildOrganizedHomeState(
         sections: List<HomeSection>,
+        dedicatedMixSections: List<HomeSection>,
         userPlaylists: List<PlaylistSummary>,
         localSpeedDial: List<Track>,
         pinnedEntries: List<SpeedDialEntry>,
@@ -990,6 +1425,12 @@ class HomeViewModel @Inject constructor(
         val quickPicks = mutableListOf<Track>()
         val personal = mutableListOf<HomeSection>()
         val communityTaste = mutableListOf<HomeSection>()
+
+        val (homeMixes, consumedMixTitles) = extractYoutubeMixes(sections)
+        val dedicatedMixes = extractDedicatedMixes(dedicatedMixSections)
+        val libraryPersonalMixes = userPlaylists.filter(::isPersonalYoutubeMixPlaylist)
+        val youtubeMixes = mergeAndPrioritizePersonalMixes(homeMixes, dedicatedMixes, libraryPersonalMixes)
+        val extractedMixKeys = youtubeMixes.mapTo(mutableSetOf()) { it.browseId.removePrefix("VL") }
 
         val excludedKeywords = listOf(
             "trending", "chart", "top songs", "top music video", "global top",
@@ -1012,18 +1453,26 @@ class HomeViewModel @Inject constructor(
                 lower.contains("speed dial") -> {
                     ytmSpeedDial += sec.items
                 }
+                sec.title in consumedMixTitles -> {
+                    // Promoted directly into youtubeMixes carousel
+                }
                 lower.contains("quick pick") || sec.isQuickPicks -> {
                     quickPicks += sec.items.mapNotNull { (it as? HomeItem.SongItem)?.track }
                 }
-                personalKeywords.any { lower.contains(it) } -> {
-                    personal += sec
-                }
-                communityKeywords.any { lower.contains(it) } ||
-                    sec.items.all { it is HomeItem.PlaylistItem } -> {
-                    communityTaste += sec
-                }
                 else -> {
-                    personal += sec
+                    val remainingItems = sec.items.filterNot { item ->
+                        item is HomeItem.PlaylistItem &&
+                            item.playlist.browseId.removePrefix("VL") in extractedMixKeys &&
+                            !lower.contains("listen again")
+                    }
+                    if (remainingItems.isEmpty()) return@forEach
+                    val filteredSec = if (remainingItems.size == sec.items.size) sec else sec.copy(items = remainingItems)
+                    when {
+                        personalKeywords.any { lower.contains(it) } -> personal += filteredSec
+                        communityKeywords.any { lower.contains(it) } ||
+                            filteredSec.items.all { it is HomeItem.PlaylistItem } -> communityTaste += filteredSec
+                        else -> personal += filteredSec
+                    }
                 }
             }
         }
@@ -1045,6 +1494,7 @@ class HomeViewModel @Inject constructor(
 
         return HomeUiState(
             speedDialItems = speedDialItems,
+            youtubeMixes = youtubeMixes,
             userPlaylists = sortedPlaylists,
             quickPicks = quickPicks.distinctBy { it.videoId }.take(16),
             personalMixSections = personal,
@@ -1056,6 +1506,165 @@ class HomeViewModel @Inject constructor(
 
     companion object {
         const val MAX_SPEED_DIAL_ITEMS = 27
+        const val MAX_MIX_CONTINUATION_PAGES = 5
+
+        private val PERSONAL_MIX_SHELF_TITLES = listOf(
+            "mixed for you",
+            "mixes for you",
+            "your mixes"
+        )
+
+        private val EDITORIAL_MIX_ID_PREFIXES = listOf(
+            "RDCLAK"
+        )
+
+        private val PERSONAL_MIX_ID_PREFIXES = listOf(
+            "RDTMAK",
+            "RDMM"
+        )
+
+        private val MY_MIX_TITLE_REGEX = Regex("^my mix(\\s+\\d+)?$")
+
+        private val PERSONAL_MIX_EXACT_TITLES = setOf(
+            "my supermix",
+            "supermix",
+            "discover mix",
+            "new release mix",
+            "replay mix",
+            "archive mix",
+            "chill mix",
+            "energy mix",
+            "focus mix",
+            "workout mix",
+            "commute mix",
+            "party mix",
+            "feel good mix",
+            "romance mix",
+            "sad mix",
+            "sleep mix",
+            "my favorite mix",
+            "my favourite mix"
+        )
+
+        fun extractYoutubeMixes(
+            sections: List<HomeSection>,
+            includeSpeedDialSections: Boolean = false
+        ): Pair<List<PlaylistSummary>, Set<String>> {
+            val seenIds = mutableSetOf<String>()
+            val mixes = mutableListOf<PlaylistSummary>()
+            val consumedShelfTitles = mutableSetOf<String>()
+
+            sections.forEach { section ->
+                val lowerTitle = section.title.trim().lowercase()
+                if (!includeSpeedDialSections && lowerTitle.contains("speed dial")) return@forEach
+
+                val isPersonalMixShelf = lowerTitle == "mixes" ||
+                    PERSONAL_MIX_SHELF_TITLES.any { lowerTitle.contains(it) }
+
+                val playlistsInSection = section.items.mapNotNull { (it as? HomeItem.PlaylistItem)?.playlist }
+                if (playlistsInSection.isEmpty()) return@forEach
+
+                val matchedFromSection = if (isPersonalMixShelf) {
+                    playlistsInSection.filterNot { isEditorialPlaylist(it) || isLikedMusicPlaylist(it) }
+                } else {
+                    playlistsInSection.filter(::isPersonalYoutubeMixPlaylist)
+                }
+
+                if (matchedFromSection.isNotEmpty()) {
+                    if ((isPersonalMixShelf && matchedFromSection.size == playlistsInSection.size) ||
+                        matchedFromSection.size == section.items.size
+                    ) {
+                        consumedShelfTitles += section.title
+                    }
+                    matchedFromSection.forEach { mix ->
+                        val canonicalKey = mix.browseId.removePrefix("VL").ifBlank { mix.id.removePrefix("VL") }
+                        if (canonicalKey.isNotBlank() && seenIds.add(canonicalKey)) {
+                            mixes += mix
+                        }
+                    }
+                }
+            }
+
+            return mixes to consumedShelfTitles
+        }
+
+        fun extractDedicatedMixes(sections: List<HomeSection>): List<PlaylistSummary> =
+            extractYoutubeMixes(sections, includeSpeedDialSections = true).first
+
+        fun mergeAndPrioritizePersonalMixes(
+            homeMixes: List<PlaylistSummary>,
+            dedicatedMixes: List<PlaylistSummary>,
+            libraryMixes: List<PlaylistSummary> = emptyList()
+        ): List<PlaylistSummary> {
+            val deduped = buildList {
+                val seen = mutableSetOf<String>()
+                (homeMixes + dedicatedMixes + libraryMixes).forEach { mix ->
+                    if (isLikedMusicPlaylist(mix) || isEditorialPlaylist(mix)) return@forEach
+                    val key = mix.browseId.removePrefix("VL").ifBlank { mix.id.removePrefix("VL") }
+                    if (key.isNotBlank() && seen.add(key)) add(mix)
+                }
+            }
+            return deduped.sortedBy { mixDisplayPriority(it.title) }
+        }
+
+        private val NUMBERED_MOOD_MIX_REGEX = Regex(".*\\bmix\\s+\\d+$")
+        private val MOOD_SUPERMIX_TITLES = setOf(
+            "chill supermix",
+            "focus supermix",
+            "energy supermix",
+            "sleep supermix",
+            "feel good supermix",
+            "party supermix",
+            "sad songs supermix",
+            "workout supermix",
+            "romantic supermix",
+            "commute supermix"
+        )
+
+        private fun mixDisplayPriority(title: String): Int {
+            val lower = title.trim().lowercase()
+            return when {
+                lower == "my supermix" || lower == "supermix" -> 0
+                lower == "discover mix" -> 1
+                lower == "archive mix" -> 2
+                lower == "replay mix" -> 3
+                lower == "new release mix" -> 4
+                MY_MIX_TITLE_REGEX.matches(lower) -> 5
+                lower in PERSONAL_MIX_EXACT_TITLES -> 6
+                lower in MOOD_SUPERMIX_TITLES || NUMBERED_MOOD_MIX_REGEX.matches(lower) -> 8
+                else -> 7
+            }
+        }
+
+        private fun isLikedMusicPlaylist(playlist: PlaylistSummary): Boolean {
+            val cleanBrowse = playlist.browseId.removePrefix("VL")
+            val cleanId = playlist.id.removePrefix("VL")
+            return cleanId.equals("LM", ignoreCase = true) || cleanBrowse.equals("LM", ignoreCase = true)
+        }
+
+        private fun isEditorialPlaylist(playlist: PlaylistSummary): Boolean {
+            val cleanBrowse = playlist.browseId.removePrefix("VL")
+            val cleanId = playlist.id.removePrefix("VL")
+            return EDITORIAL_MIX_ID_PREFIXES.any { prefix ->
+                cleanBrowse.startsWith(prefix, ignoreCase = true) ||
+                    cleanId.startsWith(prefix, ignoreCase = true)
+            }
+        }
+
+        private fun isPersonalYoutubeMixPlaylist(playlist: PlaylistSummary): Boolean {
+            if (isLikedMusicPlaylist(playlist) || isEditorialPlaylist(playlist)) return false
+            val cleanBrowse = playlist.browseId.removePrefix("VL")
+            val cleanId = playlist.id.removePrefix("VL")
+            if (PERSONAL_MIX_ID_PREFIXES.any { prefix ->
+                    cleanBrowse.startsWith(prefix, ignoreCase = true) ||
+                        cleanId.startsWith(prefix, ignoreCase = true)
+                }
+            ) {
+                return true
+            }
+            val lowerTitle = playlist.title.trim().lowercase()
+            return MY_MIX_TITLE_REGEX.matches(lowerTitle) || lowerTitle in PERSONAL_MIX_EXACT_TITLES
+        }
 
         fun buildSpeedDialEntries(
             pinnedEntries: List<SpeedDialEntry>,
@@ -1104,26 +1713,68 @@ class LibraryViewModel @Inject constructor(
     private val repository: MusicRepository,
     private val preferencesStore: PreferencesStore
 ) : ViewModel() {
-    val libraryTracks: StateFlow<List<Track>> = repository.observeLibraryTracks()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-    val likedTracks: StateFlow<List<Track>> = repository.observeLikedTracks()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    private val offlineFlow = preferencesStore.preferencesFlow
+        .map { it.offlineMode }
+        .distinctUntilChanged()
+
+    private val completedDownloadsFlow = repository.observeDownloadMap()
+        .map { map -> map.filterValues { it == 2 }.keys }
+        .distinctUntilChanged()
+
+    val libraryTracks: StateFlow<List<Track>> = combine(
+        repository.observeLibraryTracks(),
+        offlineFlow,
+        completedDownloadsFlow
+    ) { tracks, offline, dlIds ->
+        if (offline) tracks.filter { it.videoId in dlIds } else tracks
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val likedTracks: StateFlow<List<Track>> = combine(
+        repository.observeLikedTracks(),
+        offlineFlow,
+        completedDownloadsFlow
+    ) { tracks, offline, dlIds ->
+        if (offline) tracks.filter { it.videoId in dlIds } else tracks
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     val downloadedTracks: StateFlow<List<Track>> = repository.observeDownloadedTracks()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
     val smartDownloadedTracks: StateFlow<List<Track>> = repository.observeSmartDownloadedTracks()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
     val recentlyPlayedDownloadedTracks: StateFlow<List<Track>> = repository.observeRecentlyPlayedDownloadedTracks()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-    val historyTracks: StateFlow<List<Track>> = repository.observeHistoryTracks()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-    val albums: StateFlow<List<AlbumSummary>> = repository.observeLibraryAlbums()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val historyTracks: StateFlow<List<Track>> = combine(
+        repository.observeHistoryTracks(),
+        offlineFlow,
+        completedDownloadsFlow
+    ) { tracks, offline, dlIds ->
+        if (offline) tracks.filter { it.videoId in dlIds } else tracks
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val albums: StateFlow<List<AlbumSummary>> = combine(
+        repository.observeLibraryAlbums(),
+        repository.observeDownloadedAlbums(),
+        offlineFlow
+    ) { all, offlineAlbums, offline ->
+        if (offline) offlineAlbums else all
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     val downloadedAlbums: StateFlow<List<AlbumSummary>> = repository.observeDownloadedAlbums()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
     val artists = repository.observeSubscribedArtists()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-    val playlists: StateFlow<List<PlaylistSummary>> = repository.observePlaylists()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val playCounts: StateFlow<Map<String, Int>> = repository.observePlayCounts()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyMap())
+
+    val playlists: StateFlow<List<PlaylistSummary>> = combine(
+        repository.observePlaylists(),
+        repository.observeDownloadedPlaylists(),
+        offlineFlow
+    ) { all, offlinePlaylists, offline ->
+        if (offline) offlinePlaylists else all
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
@@ -1160,6 +1811,18 @@ class LibraryViewModel @Inject constructor(
         if (tab == MainTab.Home || (tab == MainTab.Library && librarySubTab == LibrarySubTab.DOWNLOADS)) {
             return
         }
+        viewModelScope.launch {
+            if (preferencesStore.current().offlineMode) return@launch
+            refreshForTabOnline(tab, librarySubTab, subFilter, force)
+        }
+    }
+
+    private suspend fun refreshForTabOnline(
+        tab: MainTab,
+        librarySubTab: LibrarySubTab,
+        subFilter: SongsSubFilter,
+        force: Boolean
+    ) {
         val key = "${tab}_${librarySubTab}_${subFilter}"
         val hasLocalData = when (tab) {
             MainTab.Home -> true
@@ -1215,7 +1878,8 @@ enum class SortOption(val label: String) {
 
 @HiltViewModel
 class DetailViewModel @Inject constructor(
-    private val repository: MusicRepository
+    private val repository: MusicRepository,
+    private val smartDownloadManager: SmartDownloadManager
 ) : ViewModel() {
     private val _album = MutableStateFlow<AlbumDetail?>(null)
     val album: StateFlow<AlbumDetail?> = _album.asStateFlow()
@@ -1367,6 +2031,32 @@ class DetailViewModel @Inject constructor(
         }
     }
 
+    fun togglePlaylistAutoDownload(playlistId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            repository.setPlaylistAutoDownload(playlistId, enabled)
+            _playlist.value = _playlist.value?.copy(autoDownload = enabled)
+            if (enabled) {
+                withContext(Dispatchers.IO) {
+                    runCatching { smartDownloadManager.syncPlaylistAutoDownloads(force = true) }
+                }
+            }
+        }
+    }
+
+    suspend fun removePlaylistDuplicates(
+        playlistId: String,
+        tracks: List<Track>,
+        duplicateIndices: Set<Int>
+    ): Int {
+        val removed = repository.removePlaylistDuplicates(playlistId, tracks, duplicateIndices).getOrDefault(0)
+        if (removed > 0) {
+            _playlist.value = _playlist.value?.copy(
+                tracks = tracks.filterIndexed { index, _ -> index !in duplicateIndices }
+            )
+        }
+        return removed
+    }
+
     fun moveTrackUpOrDown(index: Int, delta: Int) {
         val current = _playlist.value ?: return
         val targetIdx = index + delta
@@ -1480,6 +2170,8 @@ class SettingsViewModel @Inject constructor(
     val preferences: StateFlow<UserPreferences> = preferencesStore.preferencesFlow
         .stateIn(viewModelScope, SharingStarted.Lazily, UserPreferences())
 
+    private var liveEqPersistJob: Job? = null
+
     fun setDarkTheme(dark: Boolean) = update { it.copy(isDarkTheme = dark) }
     fun setContentRegion(regionCode: String) {
         val normalized = ContentRegions.normalize(regionCode)
@@ -1511,7 +2203,134 @@ class SettingsViewModel @Inject constructor(
     fun setReportHistory(v: Boolean) = update { it.copy(reportPlaybackHistory = v) }
     fun setShowThumbnails(v: Boolean) = update { it.copy(showTrackThumbnails = v) }
     fun setCacheLimitMb(mb: Int) = update { it.copy(cacheLimitMb = mb) }
-    fun setPlaybackSpeed(speed: Float) = update { it.copy(playbackSpeed = speed) }
+    fun setPlaybackSpeed(speed: Float) = update { it.copy(playbackSpeed = speed.coerceIn(0.5f, 2.0f)) }
+
+    fun setPlaybackPitch(pitch: Float) = update { it.copy(playbackPitch = pitch.coerceIn(0.5f, 2.0f)) }
+
+    fun setOfflineMode(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.setOfflineModeAutoEnabled(false)
+        }
+        update { it.copy(offlineMode = enabled) }
+        if (!enabled) {
+            syncSmartDownloadsNow()
+        }
+    }
+
+    fun setCrossfadeSeconds(seconds: Int) = update { it.copy(crossfadeSeconds = seconds.coerceIn(0, 10)) }
+
+    fun setMicroFadeOnPause(enabled: Boolean) = update { it.copy(microFadeOnPause = enabled) }
+
+    fun setShuffleMode(mode: ShuffleMode) = update { it.copy(shuffleMode = mode) }
+
+    fun setEqEnabled(enabled: Boolean) = update { it.copy(eqEnabled = enabled) }
+
+    fun setActiveEqProfileId(profileId: String) = update { it.copy(activeEqProfileId = profileId) }
+
+    fun updateLiveCustomEqBands(
+        bands: List<Float>,
+        preampDb: Float,
+        activeDeviceKey: String? = null,
+        immediate: Boolean = false,
+        onApplied: () -> Unit = {}
+    ) {
+        liveEqPersistJob?.cancel()
+        val snapshotBands = bands.take(10)
+        liveEqPersistJob = viewModelScope.launch {
+            if (!immediate) delay(50L)
+            preferencesStore.update { cur ->
+                val targetId = "custom_live"
+                val updatedProfile = EqualizerProfile(
+                    id = targetId,
+                    name = "Custom",
+                    bandGainsDb = snapshotBands,
+                    preampDb = preampDb,
+                    isBuiltIn = false
+                )
+                val others = cur.customEqProfiles.filterNot { it.id == targetId }
+                val updatedBt = if (!activeDeviceKey.isNullOrBlank() &&
+                    cur.bluetoothEqAssignments.any { it.deviceKey == activeDeviceKey }
+                ) {
+                    cur.bluetoothEqAssignments.map {
+                        if (it.deviceKey == activeDeviceKey) it.copy(profileId = targetId) else it
+                    }
+                } else {
+                    cur.bluetoothEqAssignments
+                }
+                cur.copy(
+                    eqEnabled = true,
+                    activeEqProfileId = targetId,
+                    customEqProfiles = others + updatedProfile,
+                    bluetoothEqAssignments = updatedBt
+                )
+            }
+            onApplied()
+        }
+    }
+
+    fun saveCustomEqProfile(name: String, bands: List<Float>, preampDb: Float) {
+        val newId = "custom_${System.currentTimeMillis()}"
+        val profile = EqualizerProfile(
+            id = newId,
+            name = name.trim().ifBlank { "Custom EQ" },
+            bandGainsDb = bands.take(10),
+            preampDb = preampDb,
+            isBuiltIn = false
+        )
+        update { cur ->
+            cur.copy(
+                eqEnabled = true,
+                activeEqProfileId = newId,
+                customEqProfiles = cur.customEqProfiles + profile
+            )
+        }
+    }
+
+    fun importAutoEqProfile(name: String, rawText: String): Boolean {
+        val parsed = AutoEqParser.parse(rawText, name = name) ?: return false
+        update { cur ->
+            cur.copy(
+                eqEnabled = true,
+                activeEqProfileId = parsed.id,
+                customEqProfiles = cur.customEqProfiles + parsed
+            )
+        }
+        return true
+    }
+
+    fun deleteCustomEqProfile(profileId: String) {
+        update { cur ->
+            val filtered = cur.customEqProfiles.filterNot { it.id == profileId }
+            val nextActive = if (cur.activeEqProfileId == profileId) "flat" else cur.activeEqProfileId
+            val cleanedBt = cur.bluetoothEqAssignments.filterNot { it.profileId == profileId }
+            cur.copy(
+                activeEqProfileId = nextActive,
+                customEqProfiles = filtered,
+                bluetoothEqAssignments = cleanedBt
+            )
+        }
+    }
+
+    fun assignBluetoothEq(deviceKey: String, deviceName: String, profileId: String) {
+        update { cur ->
+            val filtered = cur.bluetoothEqAssignments.filterNot { it.deviceKey == deviceKey }
+            cur.copy(
+                bluetoothEqAssignments = filtered + BluetoothEqAssignment(
+                    deviceKey = deviceKey,
+                    deviceName = deviceName,
+                    profileId = profileId
+                )
+            )
+        }
+    }
+
+    fun removeBluetoothEqAssignment(deviceKey: String) {
+        update { cur ->
+            cur.copy(
+                bluetoothEqAssignments = cur.bluetoothEqAssignments.filterNot { it.deviceKey == deviceKey }
+            )
+        }
+    }
 
     fun syncSmartDownloadsNow() {
         viewModelScope.launch(Dispatchers.IO) {

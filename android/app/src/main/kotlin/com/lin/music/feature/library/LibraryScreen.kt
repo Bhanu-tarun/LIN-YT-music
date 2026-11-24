@@ -45,6 +45,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -72,6 +73,7 @@ import com.lin.music.core.designsystem.components.LinTagPill
 import com.lin.music.core.designsystem.components.LinTrackArtHoverOverlay
 import com.lin.music.core.designsystem.components.PreloadPreviewArtworks
 import com.lin.music.core.designsystem.components.SwipeableTrackRow
+import com.lin.music.core.designsystem.components.rememberMultiTapCoordinator
 import com.lin.music.core.designsystem.icons.LinIcons
 import com.lin.music.core.designsystem.sheets.PlaylistEditorDialog
 import com.lin.music.core.designsystem.theme.LinSharpShape
@@ -84,6 +86,7 @@ import com.lin.music.core.model.ArtistSortOrder
 import com.lin.music.core.model.ArtistSummary
 import com.lin.music.core.model.LibrarySorter
 import com.lin.music.core.model.PlaylistSummary
+import com.lin.music.core.model.ShuffleMode
 import com.lin.music.core.model.SongSortOrder
 import com.lin.music.core.model.Track
 import com.lin.music.ui.LibrarySubTab
@@ -98,6 +101,8 @@ fun LibraryTabScreen(
     onSongsSubFilterChange: (SongsSubFilter) -> Unit,
     songsSortOrder: SongSortOrder,
     onSongsSortOrderChange: (SongSortOrder) -> Unit,
+    shuffleMode: ShuffleMode = ShuffleMode.TRUE_RANDOM,
+    playCounts: Map<String, Int> = emptyMap(),
     albumsSortOrder: AlbumSortOrder,
     onAlbumsSortOrderChange: (AlbumSortOrder) -> Unit,
     artistsSortOrder: ArtistSortOrder,
@@ -129,6 +134,11 @@ fun LibraryTabScreen(
     onAlbumClick: (String) -> Unit,
     onOpenLocalPlaylist: (LocalDownloadPlaylistKind) -> Unit,
     onPreviewTrack: (Track) -> Unit = {},
+    onStartMixForTrack: (Track) -> Unit = {},
+    onBatchPlayNext: (List<Track>) -> Unit = {},
+    onBatchAddToQueue: (List<Track>) -> Unit = {},
+    onBatchDownload: (List<Track>) -> Unit = {},
+    onBatchDeleteDownloads: (List<Track>) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
@@ -181,6 +191,8 @@ fun LibraryTabScreen(
                     onSubFilterChange = onSongsSubFilterChange,
                     sortOrder = songsSortOrder,
                     onSortOrderChange = onSongsSortOrderChange,
+                    shuffleMode = shuffleMode,
+                    playCounts = playCounts,
                     libraryTracks = libraryTracks,
                     likedTracks = likedTracks,
                     historyTracks = historyTracks,
@@ -195,7 +207,11 @@ fun LibraryTabScreen(
                     onSwipeRightPlayNext = onSwipeRightPlayNext,
                     onSwipeLeftAddToQueue = onSwipeLeftAddToQueue,
                     onTrackMore = onTrackMore,
-                    onPreviewTrack = onPreviewTrack
+                    onPreviewTrack = onPreviewTrack,
+                    onStartMixForTrack = onStartMixForTrack,
+                    onBatchPlayNext = onBatchPlayNext,
+                    onBatchAddToQueue = onBatchAddToQueue,
+                    onBatchDownload = onBatchDownload
                 )
 
                 LibrarySubTab.ARTISTS -> ArtistsGridScreen(
@@ -233,7 +249,11 @@ fun LibraryTabScreen(
                     onSwipeRightPlayNext = onSwipeRightPlayNext,
                     onSwipeLeftAddToQueue = onSwipeLeftAddToQueue,
                     onTrackMore = onTrackMore,
-                    onPreviewTrack = onPreviewTrack
+                    onPreviewTrack = onPreviewTrack,
+                    onStartMixForTrack = onStartMixForTrack,
+                    onBatchPlayNext = onBatchPlayNext,
+                    onBatchAddToQueue = onBatchAddToQueue,
+                    onBatchDeleteDownloads = onBatchDeleteDownloads
                 )
             }
         }
@@ -247,6 +267,8 @@ fun SongsScreen(
     onSubFilterChange: (SongsSubFilter) -> Unit,
     sortOrder: SongSortOrder,
     onSortOrderChange: (SongSortOrder) -> Unit,
+    shuffleMode: ShuffleMode = ShuffleMode.TRUE_RANDOM,
+    playCounts: Map<String, Int> = emptyMap(),
     libraryTracks: List<Track>,
     likedTracks: List<Track>,
     historyTracks: List<Track>,
@@ -262,9 +284,16 @@ fun SongsScreen(
     onSwipeLeftAddToQueue: (Track) -> Unit,
     onTrackMore: (Track) -> Unit,
     onPreviewTrack: (Track) -> Unit = {},
+    onStartMixForTrack: (Track) -> Unit = {},
+    onBatchPlayNext: (List<Track>) -> Unit = {},
+    onBatchAddToQueue: (List<Track>) -> Unit = {},
+    onBatchDownload: (List<Track>) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedRowKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var randomSortSeed by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val baseList = when (subFilter) {
         SongsSubFilter.LIBRARY -> libraryTracks
         SongsSubFilter.LIKED -> likedTracks
@@ -274,28 +303,47 @@ fun SongsScreen(
         if (activeTagFilter == null) baseList
         else baseList.filter { activeTagFilter in it.tags }
     }
-    val sorted = remember(filtered, sortOrder) {
-        LibrarySorter.sortTracks(filtered, sortOrder)
+    val effectivePlayCounts = if (sortOrder == SongSortOrder.RANDOM && shuffleMode == ShuffleMode.LEAST_PLAYED) {
+        playCounts
+    } else {
+        emptyMap()
+    }
+    val sorted = remember(filtered, sortOrder, shuffleMode, effectivePlayCounts, randomSortSeed) {
+        LibrarySorter.sortTracks(
+            tracks = filtered,
+            order = sortOrder,
+            shuffleMode = shuffleMode,
+            playCounts = effectivePlayCounts,
+            random = kotlin.random.Random(randomSortSeed)
+        )
     }
 
     val listState = rememberLazyListState()
+    val tapCoordinator = rememberMultiTapCoordinator()
     var previewedKey by remember { mutableStateOf<String?>(null) }
     var previewArtUrl by remember { mutableStateOf<String?>(null) }
     var previewCenterYPx by remember { mutableFloatStateOf(0f) }
     var boxTopInRoot by remember { mutableFloatStateOf(0f) }
     var viewportHeightPx by remember { mutableFloatStateOf(1200f) }
     var previousSort by remember { mutableStateOf(sortOrder) }
+    var previousSeed by remember { mutableLongStateOf(randomSortSeed) }
 
     LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) previewedKey = null
+        if (listState.isScrollInProgress) {
+            previewedKey = null
+            tapCoordinator.cancel()
+        }
     }
     LaunchedEffect(subFilter, activeTagFilter) {
         previewedKey = null
+        tapCoordinator.cancel()
     }
-    LaunchedEffect(sortOrder) {
+    LaunchedEffect(sortOrder, randomSortSeed) {
         previewedKey = null
-        if (previousSort != sortOrder) {
+        tapCoordinator.cancel()
+        if (previousSort != sortOrder || previousSeed != randomSortSeed) {
             previousSort = sortOrder
+            previousSeed = randomSortSeed
             listState.scrollToItem(0)
         }
     }
@@ -304,7 +352,7 @@ fun SongsScreen(
         derivedStateOf { (listState.firstVisibleItemIndex - 1).coerceAtLeast(0) }
     }
     val preloadUrls = remember(sorted, firstVisibleIdx) {
-        val end = (firstVisibleIdx + 8).coerceAtMost(sorted.size)
+        val end = (firstVisibleIdx + 14).coerceAtMost(sorted.size)
         (firstVisibleIdx until end).map { sorted[it].thumbnailUrl }
     }
     PreloadPreviewArtworks(preloadUrls, isScrolling = listState.isScrollInProgress)
@@ -347,14 +395,107 @@ fun SongsScreen(
                             }
                         }
                         Spacer(Modifier.width(8.dp))
-                        LinSortMenu(
-                            options = SongSortOrder.entries,
-                            selected = sortOrder,
-                            isDefault = sortOrder == SongSortOrder.DEFAULT,
-                            labelOf = { it.label },
-                            accentColor = accentColor,
-                            onSelect = onSortOrderChange
-                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (sorted.isNotEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clickable {
+                                            selectionMode = !selectionMode
+                                            if (!selectionMode) selectedRowKeys = emptySet()
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .background(if (selectionMode) accentColor else Color.Transparent, LinSharpShape)
+                                            .border(
+                                                1.5.dp,
+                                                if (selectionMode) accentColor else linColors.textSecondary,
+                                                LinSharpShape
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (selectionMode) {
+                                            Icon(
+                                                imageVector = LinIcons.Check,
+                                                contentDescription = "Exit multi-select",
+                                                tint = linColors.btnInvertText,
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            LinSortMenu(
+                                options = SongSortOrder.entries,
+                                selected = sortOrder,
+                                labelOf = { it.label },
+                                accentColor = accentColor,
+                                highlightActive = sortOrder == SongSortOrder.RANDOM,
+                                onSelect = { next ->
+                                    if (next == SongSortOrder.RANDOM) {
+                                        randomSortSeed = System.currentTimeMillis()
+                                    }
+                                    onSortOrderChange(next)
+                                }
+                            )
+                        }
+                    }
+
+                    if (selectionMode && sorted.isNotEmpty()) {
+                        val selectedTracks = sorted.mapIndexedNotNull { idx, t ->
+                            val rk = "${subFilter.name}_${sortOrder.name}_${idx}_${t.videoId}"
+                            if (rk in selectedRowKeys) t else null
+                        }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(linColors.glassBg)
+                                .border(1.dp, linColors.glassBorder, LinSharpShape)
+                                .padding(10.dp)
+                        ) {
+                            LinOutlinedButton(
+                                text = "play next (${selectedTracks.size})",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchPlayNext(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = "+ queue",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchAddToQueue(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = "download",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchDownload(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = if (selectedTracks.size == sorted.size) "none" else "all",
+                                onClick = {
+                                    selectedRowKeys = if (selectedTracks.size == sorted.size) {
+                                        emptySet()
+                                    } else {
+                                        sorted.mapIndexed { idx, t -> "${subFilter.name}_${sortOrder.name}_${idx}_${t.videoId}" }.toSet()
+                                    }
+                                }
+                            )
+                        }
                     }
 
                     if (activeTagFilter != null || distinctTags.isNotEmpty()) {
@@ -401,8 +542,20 @@ fun SongsScreen(
                         accentColor = accentColor,
                         isDownloaded = downloadMap[track.videoId] == 2,
                         showThumbnail = showThumbnails,
+                        hideThumbnail = previewedKey != null,
                         activeTagFilter = activeTagFilter,
                         isPreviewed = previewedKey == rowKey,
+                        tapCoordinator = tapCoordinator,
+                        rowKey = rowKey,
+                        selectionMode = selectionMode,
+                        isSelected = rowKey in selectedRowKeys,
+                        onToggleSelect = {
+                            selectedRowKeys = if (rowKey in selectedRowKeys) {
+                                selectedRowKeys - rowKey
+                            } else {
+                                selectedRowKeys + rowKey
+                            }
+                        },
                         onClick = {
                             if (previewedKey == rowKey) {
                                 previewedKey = null
@@ -416,6 +569,10 @@ fun SongsScreen(
                         onDoubleClick = {
                             previewedKey = null
                             onPlayTracks(sorted, idx, subFilter.label)
+                        },
+                        onTripleClick = {
+                            previewedKey = null
+                            onStartMixForTrack(track)
                         },
                         onSwipeRightPlayNext = { onSwipeRightPlayNext(track) },
                         onSwipeLeftAddToQueue = { onSwipeLeftAddToQueue(track) },
@@ -510,7 +667,6 @@ fun ArtistsGridScreen(
                     LinSortMenu(
                         options = ArtistSortOrder.entries,
                         selected = sortOrder,
-                        isDefault = sortOrder == ArtistSortOrder.DEFAULT,
                         labelOf = { it.label },
                         accentColor = accentColor,
                         onSelect = onSortOrderChange
@@ -624,7 +780,6 @@ fun AlbumsGridScreen(
                         LinSortMenu(
                             options = AlbumSortOrder.entries,
                             selected = sortOrder,
-                            isDefault = sortOrder == AlbumSortOrder.DEFAULT,
                             labelOf = { it.label },
                             accentColor = accentColor,
                             onSelect = onSortOrderChange
@@ -690,9 +845,9 @@ fun AlbumsGridScreen(
 private fun <T> LinSortMenu(
     options: List<T>,
     selected: T,
-    isDefault: Boolean,
     labelOf: (T) -> String,
     accentColor: Color,
+    highlightActive: Boolean = false,
     onSelect: (T) -> Unit
 ) {
     val linColors = LinTheme.colors
@@ -706,9 +861,9 @@ private fun <T> LinSortMenu(
             modifier = Modifier
                 .border(
                     1.dp,
-                    if (!isDefault || expanded) accentColor else linColors.textPrimary.copy(alpha = 0.25f)
+                    if (highlightActive || expanded) accentColor else linColors.textPrimary.copy(alpha = 0.25f)
                 )
-                .background(if (!isDefault) accentColor.copy(alpha = 0.10f) else Color.Transparent)
+                .background(if (highlightActive) accentColor.copy(alpha = 0.10f) else Color.Transparent)
                 .clickable { expanded = true }
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -716,7 +871,7 @@ private fun <T> LinSortMenu(
             Text(
                 text = linLabel("sort: ${labelOf(selected)}"),
                 style = LinTextStyles.tagPill,
-                color = if (!isDefault) accentColor else linColors.textSecondary,
+                color = if (highlightActive) accentColor else linColors.textSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -724,7 +879,7 @@ private fun <T> LinSortMenu(
             Icon(
                 imageVector = LinIcons.ChevronDown,
                 contentDescription = "Sort options",
-                tint = if (!isDefault || expanded) accentColor else linColors.textSecondary,
+                tint = if (highlightActive || expanded) accentColor else linColors.textSecondary,
                 modifier = Modifier
                     .size(13.dp)
                     .rotate(chevronRotation)
@@ -772,6 +927,7 @@ private fun <T> LinSortMenu(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DownloadsHubScreen(
     downloadedTracks: List<Track>,
@@ -791,10 +947,17 @@ fun DownloadsHubScreen(
     onSwipeLeftAddToQueue: (Track) -> Unit,
     onTrackMore: (Track) -> Unit,
     onPreviewTrack: (Track) -> Unit,
+    onStartMixForTrack: (Track) -> Unit = {},
+    onBatchPlayNext: (List<Track>) -> Unit = {},
+    onBatchAddToQueue: (List<Track>) -> Unit = {},
+    onBatchDeleteDownloads: (List<Track>) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedRowKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
     val listState = rememberLazyListState()
+    val tapCoordinator = rememberMultiTapCoordinator()
     var previewedKey by remember { mutableStateOf<String?>(null) }
     var previewArtUrl by remember { mutableStateOf<String?>(null) }
     var previewCenterYPx by remember { mutableFloatStateOf(0f) }
@@ -802,14 +965,17 @@ fun DownloadsHubScreen(
     var viewportHeightPx by remember { mutableFloatStateOf(1200f) }
 
     LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) previewedKey = null
+        if (listState.isScrollInProgress) {
+            previewedKey = null
+            tapCoordinator.cancel()
+        }
     }
 
     val firstVisibleIdx by remember(listState) {
         derivedStateOf { (listState.firstVisibleItemIndex - 3).coerceAtLeast(0) }
     }
     val preloadUrls = remember(downloadedTracks, firstVisibleIdx) {
-        val end = (firstVisibleIdx + 8).coerceAtMost(downloadedTracks.size)
+        val end = (firstVisibleIdx + 14).coerceAtMost(downloadedTracks.size)
         (firstVisibleIdx until end).map { downloadedTracks[it].thumbnailUrl }
     }
     PreloadPreviewArtworks(preloadUrls, isScrolling = listState.isScrollInProgress)
@@ -951,12 +1117,105 @@ fun DownloadsHubScreen(
             }
 
             item {
-                Text(
-                    text = linLabel("downloaded songs (${downloadedTracks.size})"),
-                    style = LinTextStyles.sectionHeading,
-                    color = linColors.textPrimary,
-                    modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = linLabel("downloaded songs (${downloadedTracks.size})"),
+                            style = LinTextStyles.sectionHeading,
+                            color = linColors.textPrimary
+                        )
+                        if (downloadedTracks.isNotEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .clickable {
+                                        selectionMode = !selectionMode
+                                        if (!selectionMode) selectedRowKeys = emptySet()
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .background(if (selectionMode) accentColor else Color.Transparent, LinSharpShape)
+                                        .border(
+                                            1.5.dp,
+                                            if (selectionMode) accentColor else linColors.textSecondary,
+                                            LinSharpShape
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (selectionMode) {
+                                        Icon(
+                                            imageVector = LinIcons.Check,
+                                            contentDescription = "Exit multi-select",
+                                            tint = linColors.btnInvertText,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (selectionMode && downloadedTracks.isNotEmpty()) {
+                        val selectedTracks = downloadedTracks.mapIndexedNotNull { idx, t ->
+                            val rk = "dl_${idx}_${t.videoId}"
+                            if (rk in selectedRowKeys) t else null
+                        }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(linColors.glassBg)
+                                .border(1.dp, linColors.glassBorder, LinSharpShape)
+                                .padding(10.dp)
+                        ) {
+                            LinOutlinedButton(
+                                text = "play next (${selectedTracks.size})",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchPlayNext(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = "+ queue",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchAddToQueue(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = "delete dl",
+                                enabled = selectedTracks.isNotEmpty(),
+                                onClick = {
+                                    onBatchDeleteDownloads(selectedTracks)
+                                    selectionMode = false
+                                    selectedRowKeys = emptySet()
+                                }
+                            )
+                            LinOutlinedButton(
+                                text = if (selectedTracks.size == downloadedTracks.size) "none" else "all",
+                                onClick = {
+                                    selectedRowKeys = if (selectedTracks.size == downloadedTracks.size) {
+                                        emptySet()
+                                    } else {
+                                        downloadedTracks.mapIndexed { idx, t -> "dl_${idx}_${t.videoId}" }.toSet()
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
             }
 
             if (downloadedTracks.isEmpty()) {
@@ -978,7 +1237,19 @@ fun DownloadsHubScreen(
                         accentColor = accentColor,
                         isDownloaded = true,
                         showThumbnail = showThumbnails,
+                        hideThumbnail = previewedKey != null,
                         isPreviewed = previewedKey == rowKey,
+                        tapCoordinator = tapCoordinator,
+                        rowKey = rowKey,
+                        selectionMode = selectionMode,
+                        isSelected = rowKey in selectedRowKeys,
+                        onToggleSelect = {
+                            selectedRowKeys = if (rowKey in selectedRowKeys) {
+                                selectedRowKeys - rowKey
+                            } else {
+                                selectedRowKeys + rowKey
+                            }
+                        },
                         onClick = {
                             if (previewedKey == rowKey) {
                                 previewedKey = null
@@ -992,6 +1263,10 @@ fun DownloadsHubScreen(
                         onDoubleClick = {
                             previewedKey = null
                             onPlayTracks(downloadedTracks, idx, "downloads")
+                        },
+                        onTripleClick = {
+                            previewedKey = null
+                            onStartMixForTrack(track)
                         },
                         onSwipeRightPlayNext = { onSwipeRightPlayNext(track) },
                         onSwipeLeftAddToQueue = { onSwipeLeftAddToQueue(track) },
@@ -1030,6 +1305,7 @@ fun PlaylistsScreen(
     onSwipeRightPlayNext: (PlaylistSummary) -> Unit,
     onSwipeLeftAddToQueue: (PlaylistSummary) -> Unit,
     onCreatePlaylist: (title: String, desc: String, privacy: String) -> Unit,
+    onSharePlaylist: ((PlaylistSummary) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val linColors = LinTheme.colors
@@ -1099,6 +1375,18 @@ fun PlaylistsScreen(
                                     modifier = Modifier.fillMaxSize()
                                 )
                             }
+                            if (pl.autoDownload) {
+                                Text(
+                                    text = "AUTO-DL",
+                                    style = LinTextStyles.tagPill,
+                                    color = linColors.btnInvertText,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(6.dp)
+                                        .background(accentColor)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
                         }
                         Spacer(Modifier.height(10.dp))
                         Text(
@@ -1162,6 +1450,16 @@ fun PlaylistsScreen(
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
+                if (onSharePlaylist != null) {
+                    LinOutlinedButton(
+                        text = "share",
+                        onClick = {
+                            onSharePlaylist(pl)
+                            longPressedPlaylist = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
                 LinOutlinedButton(
                     text = "cancel",
                     onClick = { longPressedPlaylist = null },

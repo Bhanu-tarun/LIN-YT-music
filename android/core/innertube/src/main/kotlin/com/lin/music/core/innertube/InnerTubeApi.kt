@@ -173,14 +173,24 @@ class InnerTubeApi @Inject constructor(
     }
 
     suspend fun getHome(continuation: String? = null): HomePage {
-        val params = if (continuation != null) mapOf("continuation" to continuation, "type" to "next") else emptyMap()
         val root = postInnerTube(
             endpoint = "browse",
-            queryParams = params,
             bodyBuilder = {
-                if (continuation == null) {
+                if (continuation != null) {
+                    put("continuation", continuation)
+                } else {
                     put("browseId", "FEmusic_home")
                 }
+            }
+        )
+        return InnerTubeParsers.parseHomeResponse(root)
+    }
+
+    suspend fun getMixedForYou(): HomePage {
+        val root = postInnerTube(
+            endpoint = "browse",
+            bodyBuilder = {
+                put("browseId", "FEmusic_mixed_for_you")
             }
         )
         return InnerTubeParsers.parseHomeResponse(root)

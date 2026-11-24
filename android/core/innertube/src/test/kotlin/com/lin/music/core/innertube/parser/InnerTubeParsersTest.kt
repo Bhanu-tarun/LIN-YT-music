@@ -861,4 +861,186 @@ class InnerTubeParsersTest {
         assertEquals("Orchestra", t.artistDisplay)
         assertEquals("https://example.com/box.jpg", t.thumbnailUrl)
     }
+
+    @Test
+    fun `parseHomeResponse parses watchPlaylistEndpoint and playlist-only watchEndpoint mix cards into PlaylistItem`() {
+        val fixture = """
+        {
+          "contents": {
+            "singleColumnBrowseResultsRenderer": {
+              "tabs": [{
+                "tabRenderer": {
+                  "content": {
+                    "sectionListRenderer": {
+                      "contents": [{
+                        "musicCarouselShelfRenderer": {
+                          "header": {
+                            "musicCarouselShelfBasicHeaderRenderer": {
+                              "title": { "runs": [{ "text": "Mixed for you" }] }
+                            }
+                          },
+                          "contents": [
+                            {
+                              "musicTwoRowItemRenderer": {
+                                "title": { "runs": [{ "text": "My Supermix" }] },
+                                "subtitle": { "runs": [{ "text": "Pritam, Arijit Singh" }] },
+                                "navigationEndpoint": {
+                                  "watchPlaylistEndpoint": {
+                                    "playlistId": "RDTMAK5uy_super123"
+                                  }
+                                }
+                              }
+                            },
+                            {
+                              "musicTwoRowItemRenderer": {
+                                "title": { "runs": [{ "text": "Discover Mix" }] },
+                                "subtitle": { "runs": [{ "text": "New music for you" }] },
+                                "navigationEndpoint": {
+                                  "watchEndpoint": {
+                                    "playlistId": "RDTMAK5uy_disc456"
+                                  }
+                                }
+                              }
+                            },
+                            {
+                              "musicTwoRowItemRenderer": {
+                                "title": { "runs": [{ "text": "Speed Song" }] },
+                                "subtitle": { "runs": [{ "text": "Artist One" }] },
+                                "navigationEndpoint": {
+                                  "watchEndpoint": {
+                                    "videoId": "vid_999",
+                                    "playlistId": "RDAMVM_999"
+                                  }
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      }]
+                    }
+                  }
+                }
+              }]
+            }
+          }
+        }
+        """.trimIndent()
+
+        val page = InnerTubeParsers.parseHomeResponse(json.parseToJsonElement(fixture).jsonObject)
+        assertEquals(1, page.sections.size)
+        val items = page.sections.first().items
+        assertEquals(3, items.size)
+
+        val supermix = items[0] as com.lin.music.core.model.HomeItem.PlaylistItem
+        assertEquals("RDTMAK5uy_super123", supermix.playlist.id)
+        assertEquals("VLRDTMAK5uy_super123", supermix.playlist.browseId)
+        assertEquals("My Supermix", supermix.playlist.title)
+
+        val discover = items[1] as com.lin.music.core.model.HomeItem.PlaylistItem
+        assertEquals("RDTMAK5uy_disc456", discover.playlist.id)
+        assertEquals("VLRDTMAK5uy_disc456", discover.playlist.browseId)
+        assertEquals("Discover Mix", discover.playlist.title)
+
+        val song = items[2] as com.lin.music.core.model.HomeItem.SongItem
+        assertEquals("vid_999", song.track.videoId)
+        assertEquals("Speed Song", song.track.title)
+    }
+
+    @Test
+    fun `parseNextResponse extracts playlistTitle from playlistPanelRenderer`() {
+        val fixture = """
+        {
+          "contents": {
+            "singleColumnMusicWatchNextResultsRenderer": {
+              "tabbedRenderer": {
+                "watchNextTabbedResultsRenderer": {
+                  "tabs": [{
+                    "tabRenderer": {
+                      "content": {
+                        "musicQueueRenderer": {
+                          "content": {
+                            "playlistPanelRenderer": {
+                              "title": "Archive Mix",
+                              "playlistId": "RDTMAK5uy_arch1",
+                              "contents": [{
+                                "playlistPanelVideoRenderer": {
+                                  "videoId": "v_arch_1",
+                                  "selected": true,
+                                  "title": { "runs": [{ "text": "Classic Track" }] },
+                                  "longBylineText": { "runs": [{ "text": "Old Artist" }] },
+                                  "lengthText": { "runs": [{ "text": "3:45" }] }
+                                }
+                              }]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }]
+                }
+              }
+            }
+          }
+        }
+        """.trimIndent()
+
+        val nextPage = InnerTubeParsers.parseNextResponse(json.parseToJsonElement(fixture).jsonObject)
+        assertEquals("RDTMAK5uy_arch1", nextPage.playlistId)
+        assertEquals("Archive Mix", nextPage.playlistTitle)
+        assertEquals(listOf("v_arch_1"), nextPage.tracks.map { it.videoId })
+    }
+
+    @Test
+    fun `parseHomeResponse parses immersive carousel continuation and thumbnail overlay mix endpoints`() {
+        val fixture = """
+        {
+          "onResponseReceivedActions": [
+            {
+              "appendContinuationItemsAction": {
+                "continuationItems": [
+                  {
+                    "musicImmersiveCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [{ "text": "Mixed for you" }] }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Archive Mix" }] },
+                            "subtitle": { "runs": [{ "text": "Adele, ROSÉ" }] },
+                            "thumbnailOverlay": {
+                              "musicItemThumbnailOverlayRenderer": {
+                                "content": {
+                                  "musicPlayButtonRenderer": {
+                                    "playNavigationEndpoint": {
+                                      "watchPlaylistEndpoint": {
+                                        "playlistId": "RDTMAK5uy_mZtX"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+        """.trimIndent()
+
+        val page = InnerTubeParsers.parseHomeResponse(json.parseToJsonElement(fixture).jsonObject)
+        assertEquals(1, page.sections.size)
+        assertEquals("Mixed for you", page.sections.first().title)
+        val item = page.sections.first().items.first() as com.lin.music.core.model.HomeItem.PlaylistItem
+        assertEquals("RDTMAK5uy_mZtX", item.playlist.id)
+        assertEquals("VLRDTMAK5uy_mZtX", item.playlist.browseId)
+        assertEquals("Archive Mix", item.playlist.title)
+    }
 }

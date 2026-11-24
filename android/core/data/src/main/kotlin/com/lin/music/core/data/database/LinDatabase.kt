@@ -19,7 +19,7 @@ import androidx.room.RoomDatabase
         SpeedDialPinEntity::class,
         PlaySessionEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class LinDatabase : RoomDatabase() {

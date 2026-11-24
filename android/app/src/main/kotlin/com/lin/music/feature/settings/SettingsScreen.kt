@@ -60,6 +60,7 @@ import com.lin.music.core.model.AmbientReactivity
 import com.lin.music.core.model.AudioQuality
 import com.lin.music.core.model.ContentRegionOption
 import com.lin.music.core.model.ContentRegions
+import com.lin.music.core.model.ShuffleMode
 import com.lin.music.core.model.UserPreferences
 import com.lin.music.util.ShareHelper
 import kotlinx.coroutines.launch
@@ -101,6 +102,13 @@ fun SettingsScreen(
     onSetReportHistory: (Boolean) -> Unit,
     onSetShowThumbnails: (Boolean) -> Unit,
     onSetPlaybackSpeed: (Float) -> Unit,
+    onSetPlaybackPitch: (Float) -> Unit = {},
+    onSetOfflineMode: (Boolean) -> Unit = {},
+    onSetCrossfadeSeconds: (Int) -> Unit = {},
+    onSetMicroFadeOnPause: (Boolean) -> Unit = {},
+    onSetShuffleMode: (ShuffleMode) -> Unit = {},
+    onOpenEqualizer: () -> Unit = {},
+    onOpenStats: () -> Unit = {},
     onExportBackup: suspend () -> String,
     onImportBackup: suspend (String) -> Result<Unit>,
     onToast: (String) -> Unit,
@@ -147,6 +155,29 @@ fun SettingsScreen(
                     LinInvertedButton("sync library", onClick = onSyncNow)
                     LinOutlinedButton("sign out", onClick = onLogout)
                 }
+            }
+        }
+
+        // Listening Stats (tucked cleanly inside Settings)
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, linColors.glassBorder)
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(linLabel("lin stats"), style = LinTextStyles.sectionHeading, color = linColors.textPrimary)
+                    Text(
+                        text = linLabel("listening hours, hourly rhythm, streaks & top artists"),
+                        style = LinTextStyles.subtitle,
+                        color = linColors.textSecondary
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                LinInvertedButton("open stats", onClick = onOpenStats)
             }
         }
 
@@ -693,20 +724,84 @@ fun SettingsScreen(
                 SettingToggleRow(linLabel("automix continuation"), preferences.autoMix, onSetAutoMix)
                 SettingToggleRow(linLabel("sponsorblock (skip non-music segments)"), preferences.sponsorBlockEnabled, onSetSponsorBlock)
                 SettingToggleRow(linLabel("report playback history to ytm"), preferences.reportPlaybackHistory, onSetReportHistory)
+                SettingToggleRow(linLabel("micro-fade on pause / resume"), preferences.microFadeOnPause, onSetMicroFadeOnPause)
+                SettingToggleRow(linLabel("offline mode (local & downloads only)"), preferences.offlineMode, onSetOfflineMode)
 
-                LinOutlinedButton(
-                    text = "open system equalizer",
-                    onClick = {
-                        val intent = Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).apply {
-                            putExtra(AudioEffect.EXTRA_AUDIO_SESSION, audioSessionId)
-                            putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName)
-                            putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
-                        }
-                        runCatching { context.startActivity(intent) }.onFailure {
-                            onToast("no system equalizer app found")
-                        }
-                    }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = linLabel("crossfade (${if (preferences.crossfadeSeconds == 0) "off" else "${preferences.crossfadeSeconds}s"})"),
+                    style = LinTextStyles.subtitle,
+                    color = linColors.textSecondary
                 )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(0, 2, 4, 6, 8, 10).forEach { sec ->
+                        LinTagPill(
+                            text = if (sec == 0) "off" else "${sec}s",
+                            active = preferences.crossfadeSeconds == sec,
+                            onClick = { onSetCrossfadeSeconds(sec) }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
+                Text(linLabel("shuffle mode"), style = LinTextStyles.subtitle, color = linColors.textSecondary)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ShuffleMode.entries.forEach { mode ->
+                        LinTagPill(
+                            text = mode.label,
+                            active = preferences.shuffleMode == mode,
+                            onClick = { onSetShuffleMode(mode) }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
+                val isNormalPitch = abs(preferences.playbackPitch - 1.0f) < 0.01f
+                Text(
+                    text = linLabel("playback pitch (${if (isNormalPitch) "1.0x · normal" else "${preferences.playbackPitch}x"})"),
+                    style = LinTextStyles.subtitle,
+                    color = linColors.textSecondary
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(0.85f, 1.0f, 1.1f, 1.25f).forEach { p ->
+                        val active = abs(preferences.playbackPitch - p) < 0.01f
+                        val label = if (abs(p - 1.0f) < 0.01f) "1.0x (normal)" else "${p}x"
+                        LinTagPill(label, active = active, onClick = { onSetPlaybackPitch(p) })
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    LinInvertedButton(
+                        text = "10-band eq & autoeq",
+                        onClick = onOpenEqualizer
+                    )
+                    LinOutlinedButton(
+                        text = "system equalizer",
+                        onClick = {
+                            val intent = Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).apply {
+                                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, audioSessionId)
+                                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName)
+                                putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
+                            }
+                            runCatching { context.startActivity(intent) }.onFailure {
+                                onToast("no system equalizer app found")
+                            }
+                        }
+                    )
+                }
             }
         }
 

@@ -9,6 +9,7 @@ import android.os.BatteryManager
 import android.os.PowerManager
 import com.lin.music.core.data.database.CacheDao
 import com.lin.music.core.data.database.DownloadEntity
+import com.lin.music.core.data.database.PlaylistDao
 import com.lin.music.core.data.database.TrackDao
 import com.lin.music.core.data.database.TrackEntity
 import com.lin.music.core.data.database.TrackListenStat
@@ -32,6 +33,7 @@ class SmartDownloadManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val trackDao: TrackDao,
     private val cacheDao: CacheDao,
+    private val playlistDao: PlaylistDao,
     private val downloadController: DownloadController,
     private val preferencesStore: PreferencesStore
 ) {
@@ -40,6 +42,7 @@ class SmartDownloadManager @Inject constructor(
     suspend fun syncAll(force: Boolean = false) {
         syncMutex.withLock {
             val prefs = preferencesStore.current()
+            if (prefs.offlineMode) return
             syncSmartDownloadsLocked(prefs.smartDownloadsEnabled, prefs.smartDownloadsLimit, prefs.downloadWifiOnly, force)
             syncRecentlyPlayedDownloadsLocked(
                 prefs.recentlyPlayedDownloadsEnabled,
@@ -47,12 +50,14 @@ class SmartDownloadManager @Inject constructor(
                 prefs.downloadWifiOnly,
                 force
             )
+            syncPlaylistDownloadsLocked(prefs.downloadWifiOnly, force)
         }
     }
 
     suspend fun syncSmartDownloads(force: Boolean = false) {
         syncMutex.withLock {
             val prefs = preferencesStore.current()
+            if (prefs.offlineMode) return
             syncSmartDownloadsLocked(prefs.smartDownloadsEnabled, prefs.smartDownloadsLimit, prefs.downloadWifiOnly, force)
         }
     }
@@ -60,12 +65,51 @@ class SmartDownloadManager @Inject constructor(
     suspend fun syncRecentlyPlayedDownloads(force: Boolean = false) {
         syncMutex.withLock {
             val prefs = preferencesStore.current()
+            if (prefs.offlineMode) return
             syncRecentlyPlayedDownloadsLocked(
                 prefs.recentlyPlayedDownloadsEnabled,
                 prefs.recentlyPlayedDownloadsLimit,
                 prefs.downloadWifiOnly,
                 force
             )
+        }
+    }
+
+    suspend fun syncPlaylistAutoDownloads(force: Boolean = false) {
+        syncMutex.withLock {
+            val prefs = preferencesStore.current()
+            if (prefs.offlineMode) return
+            syncPlaylistDownloadsLocked(prefs.downloadWifiOnly, force)
+        }
+    }
+
+    private suspend fun syncPlaylistDownloadsLocked(
+        wifiOnly: Boolean,
+        force: Boolean
+    ) {
+        if (!force && !isEligibleForAutoDownload(requireUnmetered = wifiOnly, minBatteryPct = 20)) {
+            return
+        }
+        val autoPlaylists = playlistDao.getAutoDownloadPlaylists()
+        val desiredTracks = autoPlaylists
+            .flatMap { pl -> playlistDao.getPlaylistTracksSnapshot(pl.id) }
+            .distinctBy { it.videoId }
+        val desiredIds = desiredTracks.map { it.videoId }.toHashSet()
+        val currentSynced = cacheDao.getDownloadsBySource(DownloadEntity.SOURCE_PLAYLIST_SYNC)
+        currentSynced.forEach { dl ->
+            if (dl.videoId !in desiredIds) {
+                downloadController.clearSourceFlagOrRemove(dl.videoId, DownloadEntity.SOURCE_PLAYLIST_SYNC)
+            }
+        }
+        if (desiredTracks.isEmpty()) return
+        val existingById = cacheDao.getAllDownloadsSnapshot().associateBy { it.videoId }
+        val toDownload = desiredTracks.mapNotNull { entity ->
+            val existing = existingById[entity.videoId]
+            val alreadyFlagged = existing != null && (existing.sourceFlags and DownloadEntity.SOURCE_PLAYLIST_SYNC) != 0
+            if (!alreadyFlagged || existing?.state != 2) entity.toModel() else null
+        }
+        if (toDownload.isNotEmpty()) {
+            downloadController.downloadAll(toDownload, sourceFlag = DownloadEntity.SOURCE_PLAYLIST_SYNC)
         }
     }
 
@@ -251,7 +295,7 @@ class SmartDownloadManager @Inject constructor(
         const val RECENT_SYNC_INTERVAL_MS = 24L * 60L * 60_000L
         const val RECENT_PRIMARY_WINDOW_MS = 24L * 60L * 60_000L
         const val RECENT_FALLBACK_WINDOW_MS = 7L * 24L * 60L * 60_000L
-        const val PLAY_SESSION_RETENTION_MS = 14L * 24L * 60L * 60_000L
+        const val PLAY_SESSION_RETENTION_MS = 365L * 24L * 60L * 60_000L
         const val RETENTION_WINDOW_MS = 7L * 24L * 60L * 60_000L
         const val MAX_ROTATION_FRACTION = 0.15
         const val HYSTERESIS_RATIO = 1.35

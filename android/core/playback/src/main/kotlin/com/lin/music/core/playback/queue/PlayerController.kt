@@ -53,6 +53,8 @@ class PlayerController @Inject constructor(
     val mixChips: StateFlow<List<MixChip>> = stateHub.mixChips
     val sleepTimerState: StateFlow<SleepTimerState> = stateHub.sleepTimerState
     val audioSessionId: StateFlow<Int> = stateHub.audioSessionId
+    val activeOutputDevice: StateFlow<Pair<String, String>?> = stateHub.activeOutputDevice
+    val isCarConnected: StateFlow<Boolean> = stateHub.isCarConnected
     val isUiForeground: StateFlow<Boolean> = stateHub.isUiForeground
     val errors = stateHub.errors
 
@@ -118,7 +120,34 @@ class PlayerController @Inject constructor(
 
     fun shuffleContext(tracks: List<Track>, sourceLabel: String) {
         if (tracks.isEmpty()) return
-        playContext(tracks.shuffled(), 0, "$sourceLabel · shuffle")
+        stateHub.autoMixContinuation = null
+        stateHub.autoMixPlaylistId = null
+        stateHub.updateMixChips(emptyList())
+        scope.launch {
+            val mode = stateHub.latestPreferences.shuffleMode
+            val playCounts = if (mode == com.lin.music.core.model.ShuffleMode.LEAST_PLAYED) {
+                runCatching { musicRepository.getAllPlayCountsSnapshot() }.getOrDefault(emptyMap())
+            } else {
+                emptyMap()
+            }
+            val shuffled = SmartShuffleEngine.shuffle(
+                tracks = tracks,
+                anchorIndex = null,
+                mode = mode,
+                playCounts = playCounts
+            )
+            stateHub.queueEngine.replaceWithContext(shuffled, 0, "$sourceLabel · shuffle")
+            stateHub.queueEngine.syncUnshuffledSeed(tracks)
+            val snap = stateHub.queueEngine.setShuffleEnabled(true)
+            stateHub.publishQueue(snap)
+            trackPrecacher.onPlaybackLoadingOrBuffering(shuffled.first().videoId)
+
+            val ctrl = ensureController()
+            ctrl.shuffleModeEnabled = false
+            ctrl.setMediaItems(shuffled.map { it.toMediaItem() }, 0, 0L)
+            ctrl.prepare()
+            ctrl.play()
+        }
     }
 
     /**
@@ -301,16 +330,39 @@ class PlayerController @Inject constructor(
                     nextPage.tracks,
                     allowSeedVideoId = seedVideoId
                 ).ifEmpty { nextPage.tracks }
+                val activeTrack = stateHub.queueEngine.snapshot.currentTrack
+                val (finalTracks, preferKeepActive) = buildMixQueueKeepingCurrent(
+                    activeTrack = activeTrack,
+                    seedVideoId = seedVideoId,
+                    fetchedMixTracks = mixTracks
+                )
+                val ctrl = ensureController()
+                val ctrlHasActive = preferKeepActive &&
+                    activeTrack != null &&
+                    ctrl.mediaItemCount > 0 &&
+                    ctrl.currentMediaItemIndex in 0 until ctrl.mediaItemCount &&
+                    ctrl.getMediaItemAt(ctrl.currentMediaItemIndex).mediaId == activeTrack.videoId
+
                 stateHub.autoMixPlaylistId = nextPage.playlistId ?: playlistId
                 stateHub.autoMixContinuation = nextPage.continuation
                 stateHub.updateMixChips(nextPage.mixChips)
-                val snap = stateHub.queueEngine.replaceWithContext(mixTracks, 0, sourceLabel)
+                val snap = stateHub.queueEngine.replaceWithContext(finalTracks, 0, sourceLabel)
                 stateHub.publishQueue(snap)
-                trackPrecacher.onPlaybackLoadingOrBuffering(mixTracks.firstOrNull()?.videoId)
-                val ctrl = ensureController()
-                ctrl.setMediaItems(mixTracks.map { it.toMediaItem() }, 0, 0L)
-                ctrl.prepare()
-                ctrl.play()
+
+                if (ctrlHasActive) {
+                    syncMediaControllerOrderKeepingCurrent(ctrl, snap)
+                    if (!ctrl.isPlaying && ctrl.playbackState != Player.STATE_BUFFERING) {
+                        if (ctrl.playbackState == Player.STATE_IDLE) {
+                            ctrl.prepare()
+                        }
+                        ctrl.play()
+                    }
+                } else {
+                    trackPrecacher.onPlaybackLoadingOrBuffering(finalTracks.firstOrNull()?.videoId)
+                    ctrl.setMediaItems(finalTracks.map { it.toMediaItem() }, 0, 0L)
+                    ctrl.prepare()
+                    ctrl.play()
+                }
             }.onFailure {
                 stateHub.emitError(it.message ?: "Failed to start mix")
             }
@@ -330,13 +382,23 @@ class PlayerController @Inject constructor(
     fun togglePlayPause() {
         scope.launch {
             val ctrl = ensureController()
+            val bridge = stateHub.serviceTimerBridge
+            val useMicroFade = stateHub.latestPreferences.microFadeOnPause && bridge != null
             if (ctrl.isPlaying) {
-                ctrl.pause()
-            } else {
-                if (ctrl.playbackState == Player.STATE_IDLE && ctrl.mediaItemCount > 0) {
-                    ctrl.prepare()
+                if (useMicroFade) {
+                    bridge?.requestMicroFadePause()
+                } else {
+                    ctrl.pause()
                 }
-                ctrl.play()
+            } else {
+                if (useMicroFade) {
+                    bridge?.requestMicroFadePlay()
+                } else {
+                    if (ctrl.playbackState == Player.STATE_IDLE && ctrl.mediaItemCount > 0) {
+                        ctrl.prepare()
+                    }
+                    ctrl.play()
+                }
             }
         }
     }
@@ -405,9 +467,55 @@ class PlayerController @Inject constructor(
     }
 
     fun toggleShuffle() {
-        val next = !stateHub.queueEngine.snapshot.shuffleEnabled
-        stateHub.publishQueue(stateHub.queueEngine.setShuffleEnabled(next))
-        scope.launch { ensureController().shuffleModeEnabled = next }
+        scope.launch {
+            val curSnap = stateHub.queueEngine.snapshot
+            val next = !curSnap.shuffleEnabled
+            val mode = stateHub.latestPreferences.shuffleMode
+            val playCounts = if (next && mode == com.lin.music.core.model.ShuffleMode.LEAST_PLAYED) {
+                runCatching { musicRepository.getAllPlayCountsSnapshot() }.getOrDefault(emptyMap())
+            } else {
+                emptyMap()
+            }
+            val newSnap = stateHub.queueEngine.setShuffleWithOrder(next, mode, playCounts)
+            stateHub.publishQueue(newSnap)
+            val ctrl = ensureController()
+            ctrl.shuffleModeEnabled = false
+            syncMediaControllerOrderKeepingCurrent(ctrl, newSnap)
+        }
+    }
+
+    fun forceApplyAudioDsp() {
+        stateHub.serviceTimerBridge?.forceApplyEq()
+    }
+
+    private fun syncMediaControllerOrderKeepingCurrent(
+        ctrl: androidx.media3.session.MediaController,
+        newSnap: QueueSnapshot
+    ) {
+        if (newSnap.items.isEmpty()) return
+        val newIdx = newSnap.currentIndex
+        val curCtrlIdx = ctrl.currentMediaItemIndex
+        val activeMatches = curCtrlIdx in 0 until ctrl.mediaItemCount &&
+            newIdx in newSnap.items.indices &&
+            ctrl.getMediaItemAt(curCtrlIdx).mediaId == newSnap.items[newIdx].videoId
+
+        if (activeMatches) {
+            if (curCtrlIdx + 1 < ctrl.mediaItemCount) {
+                ctrl.removeMediaItems(curCtrlIdx + 1, ctrl.mediaItemCount)
+            }
+            if (curCtrlIdx > 0) {
+                ctrl.removeMediaItems(0, curCtrlIdx)
+            }
+            if (newIdx > 0) {
+                ctrl.addMediaItems(0, newSnap.items.subList(0, newIdx).map { it.toMediaItem() })
+            }
+            if (newIdx + 1 < newSnap.items.size) {
+                ctrl.addMediaItems(newSnap.items.subList(newIdx + 1, newSnap.items.size).map { it.toMediaItem() })
+            }
+        } else {
+            val safeIdx = newIdx.coerceAtLeast(0).coerceAtMost(newSnap.items.lastIndex)
+            ctrl.setMediaItems(newSnap.items.map { it.toMediaItem() }, safeIdx, ctrl.currentPosition.coerceAtLeast(0L))
+        }
     }
 
     fun cycleRepeatMode() {
@@ -446,5 +554,24 @@ class PlayerController @Inject constructor(
 
     fun cancelSleepTimer() {
         stateHub.serviceTimerBridge?.cancel()
+    }
+
+    companion object {
+        fun buildMixQueueKeepingCurrent(
+            activeTrack: Track?,
+            seedVideoId: String?,
+            fetchedMixTracks: List<Track>
+        ): Pair<List<Track>, Boolean> {
+            val shouldKeepActive = activeTrack != null && (
+                (seedVideoId != null && activeTrack.videoId == seedVideoId) ||
+                    (seedVideoId == null && fetchedMixTracks.any { it.videoId == activeTrack.videoId })
+                )
+            return if (shouldKeepActive && activeTrack != null) {
+                val upcoming = fetchedMixTracks.filterNot { it.videoId == activeTrack.videoId }
+                (listOf(activeTrack) + upcoming) to true
+            } else {
+                fetchedMixTracks to false
+            }
+        }
     }
 }

@@ -41,6 +41,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -96,14 +97,27 @@ fun SearchOverlay(
         focusRequester.requestFocus()
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(linColors.searchOverlayBg)
-            .statusBarsPadding()
-            .imePadding()
-            .padding(horizontal = 20.dp)
-    ) {
+    Box(modifier = modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(linColors.searchOverlayBg)
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent().changes.forEach { it.consume() }
+                        }
+                    }
+                }
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .imePadding()
+                .padding(horizontal = 20.dp)
+        ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             horizontalArrangement = Arrangement.End
@@ -309,6 +323,7 @@ fun SearchOverlay(
                 topPadding = 4.dp,
                 bottomPadding = 112.dp
             )
+        }
         }
     }
 }

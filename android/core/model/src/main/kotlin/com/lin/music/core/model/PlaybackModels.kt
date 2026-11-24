@@ -86,11 +86,30 @@ data class LyricLine(
 )
 
 @Serializable
+enum class ShuffleMode(val label: String) {
+    TRUE_RANDOM("True Random"),
+    ARTIST_SPREAD("Artist Spread"),
+    LEAST_PLAYED("Least Played")
+}
+
+@Serializable
 data class LyricsResult(
     val videoId: String,
     val syncedLines: List<LyricLine> = emptyList(),
     val plainText: String? = null,
-    val source: String = ""
+    val source: String = "",
+    val syncOffsetMs: Long = 0L
+)
+
+@Serializable
+data class LyricsSearchCandidate(
+    val id: Long,
+    val trackName: String,
+    val artistName: String,
+    val albumName: String? = null,
+    val durationSeconds: Double? = null,
+    val syncedLyrics: String? = null,
+    val plainLyrics: String? = null
 )
 
 @Serializable

@@ -103,6 +103,7 @@ data class PlaylistEntity(
     val trackCount: Int?,
     val isEditable: Boolean,
     val inLibrary: Boolean = true,
+    val autoDownload: Boolean = false,
     val updatedAtMs: Long = System.currentTimeMillis()
 ) {
     fun toSummary(tags: List<String> = emptyList()): PlaylistSummary = PlaylistSummary(
@@ -113,7 +114,8 @@ data class PlaylistEntity(
         thumbnailUrl = thumbnailUrl,
         trackCount = trackCount,
         isEditable = isEditable,
-        tags = tags
+        tags = tags,
+        autoDownload = autoDownload
     )
 }
 
@@ -254,6 +256,7 @@ data class DownloadEntity(
         const val SOURCE_MANUAL = 1
         const val SOURCE_SMART = 2
         const val SOURCE_RECENTLY_PLAYED = 4
+        const val SOURCE_PLAYLIST_SYNC = 8
     }
 }
 
@@ -269,17 +272,21 @@ data class PersistedQueueEntity(
     val videoId: String,
     val trackJson: String,
     val isCurrent: Boolean,
-    val playbackPositionMs: Long
+    val playbackPositionMs: Long,
+    val sourceLabel: String = "queue",
+    val shuffleEnabled: Boolean = false,
+    val repeatMode: String = "OFF"
 )
 
 @Entity(tableName = "lyrics_cache")
 data class LyricsCacheEntity(
     @PrimaryKey val videoId: String,
     val resultJson: String,
+    val syncOffsetMs: Long = 0L,
     val updatedAtMs: Long = System.currentTimeMillis()
 ) {
     fun toModel(): LyricsResult? = runCatching {
-        entityJson.decodeFromString<LyricsResult>(resultJson)
+        entityJson.decodeFromString<LyricsResult>(resultJson).copy(syncOffsetMs = syncOffsetMs)
     }.getOrNull()
 }
 

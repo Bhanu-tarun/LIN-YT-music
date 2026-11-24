@@ -107,11 +107,21 @@ object DataModule {
         }
     }
 
+    private val MIGRATION_7_8 = object : Migration(7, 8) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE playlists ADD COLUMN autoDownload INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE persisted_queue ADD COLUMN sourceLabel TEXT NOT NULL DEFAULT 'queue'")
+            db.execSQL("ALTER TABLE persisted_queue ADD COLUMN shuffleEnabled INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE persisted_queue ADD COLUMN repeatMode TEXT NOT NULL DEFAULT 'OFF'")
+            db.execSQL("ALTER TABLE lyrics_cache ADD COLUMN syncOffsetMs INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): LinDatabase =
         Room.databaseBuilder(context, LinDatabase::class.java, "lin_music.db")
-            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
             .fallbackToDestructiveMigration()
             .build()
 

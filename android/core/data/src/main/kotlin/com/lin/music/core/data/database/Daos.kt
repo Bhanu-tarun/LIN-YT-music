@@ -47,6 +47,12 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE videoId = :videoId LIMIT 1")
     suspend fun getById(videoId: String): TrackEntity?
 
+    @Query("SELECT * FROM tracks ORDER BY historyTimestampMs DESC, updatedAtMs DESC")
+    fun observeAllKnownTracks(): Flow<List<TrackEntity>>
+
+    @Query("SELECT * FROM tracks")
+    suspend fun getAllKnownTracksSnapshot(): List<TrackEntity>
+
     @Query("SELECT * FROM tracks WHERE videoId IN (:videoIds)")
     suspend fun getByIds(videoIds: List<String>): List<TrackEntity>
 
@@ -93,6 +99,15 @@ interface PlaylistDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertPlaylists(playlists: List<PlaylistEntity>)
+
+    @Query("SELECT * FROM playlists")
+    suspend fun getAllPlaylistsSnapshot(): List<PlaylistEntity>
+
+    @Query("UPDATE playlists SET autoDownload = :enabled WHERE id = :playlistId")
+    suspend fun setAutoDownload(playlistId: String, enabled: Boolean)
+
+    @Query("SELECT * FROM playlists WHERE autoDownload = 1")
+    suspend fun getAutoDownloadPlaylists(): List<PlaylistEntity>
 
     @Query("DELETE FROM playlists WHERE id = :playlistId")
     suspend fun deletePlaylist(playlistId: String)
@@ -269,6 +284,15 @@ interface CacheDao {
         """
     )
     suspend fun getListenStatsSince(sinceMs: Long, limit: Int): List<TrackListenStat>
+
+    @Query("UPDATE lyrics_cache SET syncOffsetMs = :offsetMs, updatedAtMs = :updatedAtMs WHERE videoId = :videoId")
+    suspend fun updateLyricsOffset(videoId: String, offsetMs: Long, updatedAtMs: Long = System.currentTimeMillis())
+
+    @Query("SELECT * FROM play_sessions ORDER BY playedAtMs DESC")
+    fun observeAllPlaySessions(): Flow<List<PlaySessionEntity>>
+
+    @Query("SELECT * FROM play_sessions")
+    suspend fun getAllPlaySessions(): List<PlaySessionEntity>
 
     @Query("DELETE FROM play_sessions WHERE playedAtMs < :beforeMs")
     suspend fun prunePlaySessionsBefore(beforeMs: Long)

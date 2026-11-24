@@ -32,14 +32,19 @@ object LrcParser {
         return lines.sortedBy { it.timeMs }
     }
 
-    fun findActiveLineIndex(lines: List<LyricLine>, positionMs: Long): Int {
+    fun findActiveLineIndex(
+        lines: List<LyricLine>,
+        positionMs: Long,
+        offsetMs: Long = 0L
+    ): Int {
         if (lines.isEmpty()) return -1
+        val adjusted = (positionMs + offsetMs).coerceAtLeast(0L)
         var low = 0
         var high = lines.lastIndex
         var result = -1
         while (low <= high) {
             val mid = (low + high) ushr 1
-            if (lines[mid].timeMs <= positionMs) {
+            if (lines[mid].timeMs <= adjusted) {
                 result = mid
                 low = mid + 1
             } else {

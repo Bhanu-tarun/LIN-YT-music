@@ -1,6 +1,7 @@
 package com.lin.music.core.playback.queue
 
 import com.lin.music.core.model.RepeatMode
+import com.lin.music.core.model.ShuffleMode
 import com.lin.music.core.model.Track
 
 data class QueueSnapshot(
@@ -13,8 +14,17 @@ data class QueueSnapshot(
     val currentTrack: Track?
         get() = items.getOrNull(currentIndex)
 
+    fun remainingDurationMs(currentPositionMs: Long): Long {
+        if (items.isEmpty() || currentIndex !in items.indices) return 0L
+        val currentRem = (items[currentIndex].durationMs - currentPositionMs).coerceAtLeast(0L)
+        val upcoming = if (currentIndex + 1 < items.size) {
+            items.subList(currentIndex + 1, items.size).sumOf { it.durationMs.coerceAtLeast(0L) }
+        } else 0L
+        return currentRem + upcoming
+    }
+
     fun nextTrackIndexOrNull(): Int? {
-        if (shuffleEnabled || items.isEmpty()) return null
+        if (items.isEmpty()) return null
         val next = currentIndex + 1
         return when {
             next in items.indices -> next
@@ -24,7 +34,7 @@ data class QueueSnapshot(
     }
 
     fun previousTrackIndexOrNull(): Int? {
-        if (shuffleEnabled || items.isEmpty()) return null
+        if (items.isEmpty()) return null
         val prev = currentIndex - 1
         return when {
             prev in items.indices -> prev
@@ -55,10 +65,31 @@ class QueueEngine(initial: QueueSnapshot = QueueSnapshot()) {
         sourceLabel: String
     ): QueueSnapshot {
         val safeIdx = if (tracks.isEmpty()) -1 else startIndex.coerceIn(0, tracks.lastIndex)
+        unshuffledItems = tracks
         snapshot = snapshot.copy(
             items = tracks,
             currentIndex = safeIdx,
-            sourceLabel = sourceLabel
+            sourceLabel = sourceLabel,
+            shuffleEnabled = false
+        )
+        return snapshot
+    }
+
+    fun restorePersisted(
+        tracks: List<Track>,
+        currentIndex: Int,
+        sourceLabel: String,
+        shuffleEnabled: Boolean,
+        repeatMode: RepeatMode
+    ): QueueSnapshot {
+        val safeIdx = if (tracks.isEmpty()) -1 else currentIndex.coerceIn(0, tracks.lastIndex)
+        unshuffledItems = tracks
+        snapshot = QueueSnapshot(
+            items = tracks,
+            currentIndex = safeIdx,
+            sourceLabel = sourceLabel,
+            shuffleEnabled = shuffleEnabled,
+            repeatMode = repeatMode
         )
         return snapshot
     }
@@ -201,5 +232,63 @@ class QueueEngine(initial: QueueSnapshot = QueueSnapshot()) {
     fun setShuffleEnabled(enabled: Boolean): QueueSnapshot {
         snapshot = snapshot.copy(shuffleEnabled = enabled)
         return snapshot
+    }
+
+    fun updateItemsInPlace(newItems: List<Track>): QueueSnapshot {
+        val byId = newItems.associateBy { it.videoId }
+        unshuffledItems = unshuffledItems.map { byId[it.videoId] ?: it }
+        snapshot = snapshot.copy(items = newItems)
+        return snapshot
+    }
+
+    private var unshuffledItems: List<Track> = initial.items
+
+    fun syncUnshuffledSeed(items: List<Track>) {
+        unshuffledItems = items
+    }
+
+    fun setShuffleWithOrder(
+        enabled: Boolean,
+        mode: ShuffleMode,
+        playCounts: Map<String, Int> = emptyMap()
+    ): QueueSnapshot {
+        val current = snapshot
+        if (current.items.isEmpty()) {
+            snapshot = current.copy(shuffleEnabled = enabled)
+            return snapshot
+        }
+        val activeTrack = current.currentTrack
+        return if (enabled) {
+            if (!current.shuffleEnabled || unshuffledItems.isEmpty()) {
+                unshuffledItems = current.items
+            }
+            val shuffled = SmartShuffleEngine.shuffle(
+                tracks = current.items,
+                anchorIndex = current.currentIndex.takeIf { it in current.items.indices },
+                mode = mode,
+                playCounts = playCounts
+            )
+            val newIdx = if (activeTrack != null) 0 else -1
+            snapshot = current.copy(
+                items = shuffled,
+                currentIndex = newIdx,
+                shuffleEnabled = true
+            )
+            snapshot
+        } else {
+            val base = if (unshuffledItems.isNotEmpty()) unshuffledItems else current.items
+            val baseIds = base.mapTo(HashSet()) { it.videoId }
+            val extra = current.items.filter { it.videoId !in baseIds }
+            val restored = base + extra
+            val newIdx = activeTrack?.let { tr -> restored.indexOfFirst { it.videoId == tr.videoId } }
+                ?.takeIf { it >= 0 }
+                ?: current.currentIndex.coerceIn(0, (restored.size - 1).coerceAtLeast(0))
+            snapshot = current.copy(
+                items = restored,
+                currentIndex = if (restored.isEmpty()) -1 else newIdx,
+                shuffleEnabled = false
+            )
+            snapshot
+        }
     }
 }

@@ -51,6 +51,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -83,9 +84,12 @@ import com.lin.music.feature.home.HomeScreen
 import com.lin.music.feature.library.LibraryTabScreen
 import com.lin.music.feature.library.PlaylistsScreen
 import com.lin.music.feature.player.DockedMiniPlayer
+import com.lin.music.feature.player.DrivingModeScreen
 import com.lin.music.feature.player.NowPlayingSheet
 import com.lin.music.feature.search.SearchOverlay
+import com.lin.music.feature.settings.EqualizerScreen
 import com.lin.music.feature.settings.SettingsScreen
+import com.lin.music.feature.stats.StatsScreen
 import com.lin.music.util.ShareHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -128,6 +132,14 @@ fun LinAppShell(
     val tagEditorTags by mainViewModel.tagEditorTags.collectAsStateWithLifecycle()
     val lyricsResult by mainViewModel.lyricsResult.collectAsStateWithLifecycle()
     val lyricsLoading by mainViewModel.lyricsLoading.collectAsStateWithLifecycle()
+    val lyricsSearchResults by mainViewModel.lyricsSearchResults.collectAsStateWithLifecycle()
+    val lyricsSearching by mainViewModel.lyricsSearching.collectAsStateWithLifecycle()
+    val translatedLyricsLines by mainViewModel.translatedLyricsLines.collectAsStateWithLifecycle()
+    val translatingLyrics by mainViewModel.translatingLyrics.collectAsStateWithLifecycle()
+    val showDrivingMode by mainViewModel.showDrivingMode.collectAsStateWithLifecycle()
+    val statsRange by mainViewModel.statsRange.collectAsStateWithLifecycle()
+    val listeningStats by mainViewModel.listeningStats.collectAsStateWithLifecycle()
+    val activeOutputDevice by mainViewModel.activeOutputDevice.collectAsStateWithLifecycle()
     val relatedSections by mainViewModel.relatedSections.collectAsStateWithLifecycle()
 
     LinTheme(isDark = preferences.isDarkTheme, capitalizeLabels = preferences.capitalizeLabels) {
@@ -164,8 +176,9 @@ fun LinAppShell(
                     onLoggedIn = mainViewModel::onWebViewLoggedIn
                 )
             } else if (sessionInitialized) {
-                BackHandler(enabled = isPlayerExpanded || isSearchOpen || detailStack.isNotEmpty()) {
+                BackHandler(enabled = showDrivingMode || isPlayerExpanded || isSearchOpen || detailStack.isNotEmpty()) {
                     when {
+                        showDrivingMode -> mainViewModel.closeDrivingMode()
                         isPlayerExpanded -> mainViewModel.setPlayerExpanded(false)
                         isSearchOpen -> mainViewModel.setSearchOpen(false)
                         else -> mainViewModel.popDetail()
@@ -176,6 +189,8 @@ fun LinAppShell(
                 val libraryViewModel: LibraryViewModel = hiltViewModel()
                 val searchViewModel: SearchViewModel = hiltViewModel()
                 val settingsViewModel: SettingsViewModel = hiltViewModel()
+
+                val libraryPlaylists by libraryViewModel.playlists.collectAsStateWithLifecycle()
 
                 var librarySubTab by remember { mutableStateOf(LibrarySubTab.SONGS) }
                 var songsSubFilter by remember { mutableStateOf(SongsSubFilter.LIBRARY) }
@@ -205,15 +220,47 @@ fun LinAppShell(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        var logoTapCount by remember { mutableStateOf(0) }
+                        var lastLogoTapMs by remember { mutableLongStateOf(0L) }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(LinSharpShape)
+                                .clickable {
+                                    val now = System.currentTimeMillis()
+                                    val nextCount = if (now - lastLogoTapMs <= 650L) logoTapCount + 1 else 1
+                                    lastLogoTapMs = now
+                                    if (nextCount >= 3) {
+                                        logoTapCount = 0
+                                        mainViewModel.toggleOfflineMode()
+                                    } else {
+                                        logoTapCount = nextCount
+                                    }
+                                }
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
                             Text(APP_BRAND_NAME, style = LinTextStyles.brand, color = accentColor)
                             Spacer(Modifier.width(10.dp))
                             Box(
                                 modifier = Modifier
                                     .size(6.dp)
                                     .clip(CircleShape)
-                                    .background(if (isSyncing) accentColor else linColors.textSecondary.copy(alpha = 0.5f))
+                                    .background(
+                                        when {
+                                            preferences.offlineMode -> accentColor
+                                            isSyncing -> accentColor
+                                            else -> linColors.textSecondary.copy(alpha = 0.5f)
+                                        }
+                                    )
                             )
+                            if (preferences.offlineMode) {
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = linLabel("offline"),
+                                    style = LinTextStyles.tagPill,
+                                    color = accentColor
+                                )
+                            }
                         }
 
                         Box(
@@ -241,18 +288,18 @@ fun LinAppShell(
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            IconButton(onClick = { mainViewModel.setSearchOpen(true) }, modifier = Modifier.size(40.dp)) {
+                            IconButton(onClick = { mainViewModel.setSearchOpen(true) }, modifier = Modifier.size(38.dp)) {
                                 Icon(LinIcons.Search, "Search", tint = linColors.textPrimary, modifier = Modifier.size(20.dp))
                             }
-                            IconButton(onClick = { mainViewModel.openDetail(DetailRoute.Settings) }, modifier = Modifier.size(40.dp)) {
+                            IconButton(onClick = { mainViewModel.openDetail(DetailRoute.Settings) }, modifier = Modifier.size(38.dp)) {
                                 Icon(LinIcons.Settings, "Settings", tint = linColors.textSecondary, modifier = Modifier.size(20.dp))
                             }
                             // Floating circular theme toggle matching .theme-toggle in styles.css
                             Box(
                                 modifier = Modifier
-                                    .size(40.dp)
+                                    .size(38.dp)
                                     .clip(CircleShape)
                                     .background(linColors.glassBg)
                                     .border(1.dp, linColors.glassBorder, CircleShape)
@@ -281,6 +328,8 @@ fun LinAppShell(
                                     is DetailRoute.LocalPlaylist -> "lp_${state.kind}"
                                     is DetailRoute.Artist -> "artist_${state.browseId}"
                                     DetailRoute.Settings -> "settings"
+                                    DetailRoute.Stats -> "stats"
+                                    DetailRoute.Equalizer -> "equalizer"
                                     is MainTab -> "tab_${state}"
                                     else -> state.hashCode()
                                 }
@@ -326,7 +375,8 @@ fun LinAppShell(
                                         onTrackMore = { t -> mainViewModel.openTrackActions(t) },
                                         onPreviewTrack = mainViewModel::prefetchTrack,
                                         isPinnedToSpeedDial = albumPinItem?.let { it.speedDialKey() in pinnedSpeedDialKeys } == true,
-                                        onTogglePinSpeedDial = albumPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } }
+                                        onTogglePinSpeedDial = albumPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } },
+                                        onShareAlbum = { alb -> mainViewModel.shareAlbum(alb, accentColor.toArgb(), activityContext) }
                                     )
                                 }
 
@@ -353,6 +403,7 @@ fun LinAppShell(
                                         onPlayTracks = mainViewModel.playerController::playContext,
                                         onShuffle = mainViewModel.playerController::shuffleContext,
                                         onStartMix = mainViewModel::startMixForPlaylist,
+                                        onStartMixForTrack = mainViewModel::startMixForTrack,
                                         onDownloadAll = { tracks ->
                                             plData?.let { mainViewModel.downloadPlaylist(it) }
                                                 ?: mainViewModel.downloadController.downloadAll(tracks)
@@ -390,7 +441,25 @@ fun LinAppShell(
                                         onTrackRestoredLocal = detailVm::restorePlaylistTrackLocal,
                                         onPreviewTrack = mainViewModel::prefetchTrack,
                                         isPinnedToSpeedDial = plPinItem?.let { it.speedDialKey() in pinnedSpeedDialKeys } == true,
-                                        onTogglePinSpeedDial = plPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } }
+                                        onTogglePinSpeedDial = plPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } },
+                                        onToggleAutoDownload = { enabled ->
+                                            plData?.id?.let { id ->
+                                                detailVm.togglePlaylistAutoDownload(id, enabled)
+                                                mainViewModel.showToast(
+                                                    if (enabled) "auto-downloading playlist tracks offline" else "auto-download disabled"
+                                                )
+                                            }
+                                        },
+                                        onRemoveDuplicates = { dupes ->
+                                            val cur = plData ?: return@PlaylistDetailScreen 0
+                                            val removed = detailVm.removePlaylistDuplicates(cur.id, cur.tracks, dupes)
+                                            if (removed > 0) mainViewModel.showToast("removed $removed duplicate(s)")
+                                            removed
+                                        },
+                                        onBatchPlayNext = { picked -> mainViewModel.batchPlayNext(picked, plData?.title ?: "playlist") },
+                                        onBatchAddToQueue = { picked -> mainViewModel.batchAddToQueue(picked, plData?.title ?: "playlist") },
+                                        onBatchDownload = mainViewModel::batchDownload,
+                                        onSharePlaylist = { pl -> mainViewModel.sharePlaylist(pl, accentColor.toArgb(), activityContext) }
                                     )
                                 }
 
@@ -430,6 +499,7 @@ fun LinAppShell(
                                         onPlayTracks = mainViewModel.playerController::playContext,
                                         onShuffle = mainViewModel.playerController::shuffleContext,
                                         onStartMix = { _, _ -> },
+                                        onStartMixForTrack = mainViewModel::startMixForTrack,
                                         onDownloadAll = {},
                                         onToggleSaveLibrary = {},
                                         onCloneToEditable = {},
@@ -471,7 +541,8 @@ fun LinAppShell(
                                         onSwipeLeftAddToQueue = mainViewModel::addToQueue,
                                         onTrackMore = { t -> mainViewModel.openTrackActions(t) },
                                         isPinnedToSpeedDial = artistPinItem?.let { it.speedDialKey() in pinnedSpeedDialKeys } == true,
-                                        onTogglePinSpeedDial = artistPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } }
+                                        onTogglePinSpeedDial = artistPinItem?.let { item -> { mainViewModel.toggleSpeedDialPin(item) } },
+                                        onShareArtist = { art -> mainViewModel.shareArtist(art, accentColor.toArgb(), activityContext) }
                                     )
                                 }
 
@@ -520,9 +591,93 @@ fun LinAppShell(
                                         onSetReportHistory = settingsViewModel::setReportHistory,
                                         onSetShowThumbnails = settingsViewModel::setShowThumbnails,
                                         onSetPlaybackSpeed = settingsViewModel::setPlaybackSpeed,
+                                        onSetPlaybackPitch = settingsViewModel::setPlaybackPitch,
+                                        onSetOfflineMode = settingsViewModel::setOfflineMode,
+                                        onSetCrossfadeSeconds = settingsViewModel::setCrossfadeSeconds,
+                                        onSetMicroFadeOnPause = settingsViewModel::setMicroFadeOnPause,
+                                        onSetShuffleMode = settingsViewModel::setShuffleMode,
+                                        onOpenEqualizer = { mainViewModel.openDetail(DetailRoute.Equalizer) },
+                                        onOpenStats = { mainViewModel.openDetail(DetailRoute.Stats) },
                                         onExportBackup = settingsViewModel::exportBackup,
                                         onImportBackup = settingsViewModel::importBackup,
                                         onToast = { msg -> mainViewModel.showToast(msg) }
+                                    )
+                                }
+
+                                DetailRoute.Stats -> {
+                                    StatsScreen(
+                                        summary = listeningStats,
+                                        selectedRange = statsRange,
+                                        accentColor = accentColor,
+                                        onSelectRange = mainViewModel::selectStatsRange,
+                                        onPlayTracks = mainViewModel.playerController::playContext,
+                                        onGoToArtist = { id -> mainViewModel.openDetail(DetailRoute.Artist(id)) },
+                                        onGoToAlbum = { id -> mainViewModel.openDetail(DetailRoute.Album(id)) },
+                                        onShareCard = { mainViewModel.shareStatsCard(accentColor.toArgb(), activityContext) },
+                                        onBack = { mainViewModel.popDetail() }
+                                    )
+                                }
+
+                                DetailRoute.Equalizer -> {
+                                    EqualizerScreen(
+                                        prefs = preferences,
+                                        activeOutputDevice = activeOutputDevice,
+                                        accentColor = accentColor,
+                                        onToggleEq = { enabled ->
+                                            settingsViewModel.setEqEnabled(enabled)
+                                            mainViewModel.playerController.forceApplyAudioDsp()
+                                        },
+                                        onSelectProfile = { profileId ->
+                                            settingsViewModel.setActiveEqProfileId(profileId)
+                                            mainViewModel.playerController.forceApplyAudioDsp()
+                                        },
+                                        onUpdateBandsLive = { bands, preamp ->
+                                            settingsViewModel.updateLiveCustomEqBands(
+                                                bands = bands,
+                                                preampDb = preamp,
+                                                activeDeviceKey = activeOutputDevice?.first,
+                                                immediate = false,
+                                                onApplied = mainViewModel.playerController::forceApplyAudioDsp
+                                            )
+                                        },
+                                        onCommitBandsLive = { bands, preamp ->
+                                            settingsViewModel.updateLiveCustomEqBands(
+                                                bands = bands,
+                                                preampDb = preamp,
+                                                activeDeviceKey = activeOutputDevice?.first,
+                                                immediate = true,
+                                                onApplied = mainViewModel.playerController::forceApplyAudioDsp
+                                            )
+                                        },
+                                        onSaveProfileAs = { name, bands, preamp ->
+                                            settingsViewModel.saveCustomEqProfile(name, bands, preamp)
+                                            mainViewModel.playerController.forceApplyAudioDsp()
+                                            mainViewModel.showToast("saved eq preset: $name")
+                                        },
+                                        onImportAutoEq = { name, raw ->
+                                            val ok = settingsViewModel.importAutoEqProfile(name, raw)
+                                            if (ok) {
+                                                mainViewModel.playerController.forceApplyAudioDsp()
+                                                mainViewModel.showToast("imported autoeq: $name")
+                                            }
+                                            ok
+                                        },
+                                        onDeleteCustomProfile = { id ->
+                                            settingsViewModel.deleteCustomEqProfile(id)
+                                            mainViewModel.playerController.forceApplyAudioDsp()
+                                        },
+                                        onAssignDeviceProfile = { key, devName, profileId ->
+                                            settingsViewModel.assignBluetoothEq(key, devName, profileId)
+                                            mainViewModel.playerController.forceApplyAudioDsp()
+                                            mainViewModel.showToast("bound eq profile to $devName")
+                                        },
+                                        onRemoveDeviceAssignment = { key ->
+                                            settingsViewModel.removeBluetoothEqAssignment(key)
+                                            mainViewModel.playerController.forceApplyAudioDsp()
+                                        },
+                                        onSpeedChange = settingsViewModel::setPlaybackSpeed,
+                                        onPitchChange = settingsViewModel::setPlaybackPitch,
+                                        onBack = { mainViewModel.popDetail() }
                                     )
                                 }
 
@@ -556,6 +711,7 @@ fun LinAppShell(
                                     val albums by libraryViewModel.albums.collectAsStateWithLifecycle()
                                     val downloadedAlbums by libraryViewModel.downloadedAlbums.collectAsStateWithLifecycle()
                                     val artists by libraryViewModel.artists.collectAsStateWithLifecycle()
+                                    val libraryPlayCounts by libraryViewModel.playCounts.collectAsStateWithLifecycle()
 
                                     LibraryTabScreen(
                                         subTab = librarySubTab,
@@ -564,6 +720,8 @@ fun LinAppShell(
                                         onSongsSubFilterChange = { songsSubFilter = it },
                                         songsSortOrder = preferences.songsSortOrder,
                                         onSongsSortOrderChange = libraryViewModel::setSongsSortOrder,
+                                        shuffleMode = preferences.shuffleMode,
+                                        playCounts = libraryPlayCounts,
                                         albumsSortOrder = preferences.albumsSortOrder,
                                         onAlbumsSortOrderChange = libraryViewModel::setAlbumsSortOrder,
                                         artistsSortOrder = preferences.artistsSortOrder,
@@ -594,12 +752,17 @@ fun LinAppShell(
                                         onArtistClick = { id -> mainViewModel.openDetail(DetailRoute.Artist(id)) },
                                         onAlbumClick = { id -> mainViewModel.openDetail(DetailRoute.Album(id)) },
                                         onOpenLocalPlaylist = { kind -> mainViewModel.openDetail(DetailRoute.LocalPlaylist(kind)) },
-                                        onPreviewTrack = mainViewModel::prefetchTrack
+                                        onPreviewTrack = mainViewModel::prefetchTrack,
+                                        onStartMixForTrack = mainViewModel::startMixForTrack,
+                                        onBatchPlayNext = { picked -> mainViewModel.batchPlayNext(picked, "library") },
+                                        onBatchAddToQueue = { picked -> mainViewModel.batchAddToQueue(picked, "library") },
+                                        onBatchDownload = mainViewModel::batchDownload,
+                                        onBatchDeleteDownloads = mainViewModel::batchDeleteDownloads
                                     )
                                 }
 
                                 MainTab.Playlists -> PlaylistsScreen(
-                                    playlists = playlists,
+                                    playlists = libraryPlaylists,
                                     activeTagFilter = activeTagFilter,
                                     accentColor = accentColor,
                                     onTagClick = mainViewModel::setActiveTagFilter,
@@ -608,7 +771,8 @@ fun LinAppShell(
                                     onSwipeLeftAddToQueue = mainViewModel::addPlaylistToQueue,
                                     onCreatePlaylist = { title, desc, privacy ->
                                         mainViewModel.createPlaylist(title, desc, privacy)
-                                    }
+                                    },
+                                    onSharePlaylist = { pl -> mainViewModel.sharePlaylistSummary(pl, accentColor.toArgb(), activityContext) }
                                 )
                             }
                         }
@@ -751,7 +915,51 @@ fun LinAppShell(
                         onPrewarmSwipeTarget = mainViewModel::prefetchTrack,
                         onDockStateChanged = { isLyrics, isRelated ->
                             mainViewModel.onNowPlayingDockChanged(isPlayerExpanded, isLyrics, isRelated)
-                        }
+                        },
+                        lyricsShowOriginal = preferences.lyricsShowOriginal,
+                        lyricsShowRomanized = preferences.lyricsShowRomanized,
+                        lyricsShowTranslation = preferences.lyricsShowTranslation,
+                        translatedLyricsLines = translatedLyricsLines,
+                        translatingLyrics = translatingLyrics,
+                        lyricsSearchResults = lyricsSearchResults,
+                        lyricsSearching = lyricsSearching,
+                        onAdjustLyricsOffset = mainViewModel::adjustLyricsOffset,
+                        onResetLyricsOffset = mainViewModel::resetLyricsOffset,
+                        onSearchLyrics = mainViewModel::searchLyricsCandidates,
+                        onSelectLyricsCandidate = mainViewModel::applyLyricsCandidate,
+                        onSetLyricsDisplayFlags = { orig, rom, tr ->
+                            mainViewModel.setLyricsDisplayFlags(orig, rom, tr)
+                        },
+                        onShareLyricsCard = { t, lines, rom, color ->
+                            mainViewModel.shareLyricsCard(t, lines, rom, color, activityContext)
+                        },
+                        onLyricsModeToast = mainViewModel::showToast
+                    )
+                }
+
+                // High-contrast OLED Driving Mode Overlay (screen-on while open)
+                AnimatedVisibility(
+                    visible = showDrivingMode,
+                    enter = fadeIn(tween(180)),
+                    exit = fadeOut(tween(150))
+                ) {
+                    val drivePos by mainViewModel.playerController.positionMs.collectAsStateWithLifecycle()
+                    val driveDur by mainViewModel.playerController.durationMs.collectAsStateWithLifecycle()
+                    val driveNextTrack = remember(queueSnapshot) {
+                        queueSnapshot.nextTrackIndexOrNull()?.let { queueSnapshot.items.getOrNull(it) }
+                    }
+                    DrivingModeScreen(
+                        currentTrack = queueSnapshot.currentTrack,
+                        nextTrack = driveNextTrack,
+                        isPlaying = isPlaying,
+                        positionMs = drivePos,
+                        durationMs = driveDur,
+                        accentColor = accentColor,
+                        onTogglePlayPause = mainViewModel.playerController::togglePlayPause,
+                        onSkipPrevious = mainViewModel.playerController::skipPrevious,
+                        onSkipNext = mainViewModel.playerController::skipNext,
+                        onToggleLike = { queueSnapshot.currentTrack?.let(mainViewModel::toggleLike) },
+                        onExit = mainViewModel::closeDrivingMode
                     )
                 }
 
@@ -824,9 +1032,22 @@ fun LinAppShell(
                         onManageTags = {
                             mainViewModel.openTagEditor(TagEditorTarget(track.videoId, "track", track.title))
                         },
-                        onShare = { ShareHelper.shareTrack(activityContext, track) },
+                        onShare = {
+                            mainViewModel.shareTrack(
+                                track = track,
+                                accentColorInt = accentColor.toArgb(),
+                                launcherContext = activityContext
+                            )
+                        },
                         onShareAtTimestamp = if (isPlayerExpanded && track.videoId == currentVideoId && snapPositionMs > 1000L) {
-                            { ShareHelper.shareTrack(activityContext, track, snapPositionMs / 1000L) }
+                            {
+                                mainViewModel.shareTrack(
+                                    track = track,
+                                    timestampSec = snapPositionMs / 1000L,
+                                    accentColorInt = accentColor.toArgb(),
+                                    launcherContext = activityContext
+                                )
+                            }
                         } else null,
                         shareTimestampLabel = if (isPlayerExpanded && track.videoId == currentVideoId && snapPositionMs > 1000L) {
                             formatDurationMs(snapPositionMs)
